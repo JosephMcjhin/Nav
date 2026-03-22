@@ -1,0 +1,19 @@
+# Python dependencies for voice navigation
+# Install with: uv pip install --system -r requirements.txt
+
+# Speech recognition (Whisper via direct API, no pyaudio needed)
+openai-whisper>=20231117
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# MCP server (Model Context Protocol)
+fastmcp>=0.4.0
+
+# Audio processing (required by whisper)
+# ffmpeg must be installed separately: https://ffmpeg.org/download.html
+# On Windows: winget install Gyan.FFmpeg
+
+# Web Server Dependencies
+flask>=3.0
+flask-sock>=0.7

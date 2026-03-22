@@ -1,0 +1,31 @@
+# Unreal Engine Standard
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+*.sln
+*.suo
+*.pdb
+*.obj
+
+# User specific request: Exclude Content for now
+Content/
+
+# Mobile Server / Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.venv
+env/
+dist/
+build/
+*.egg-info/
+
+# OS specific
+.DS_Store
+Thumbs.db

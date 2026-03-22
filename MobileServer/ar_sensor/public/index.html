@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AR Sensor to UE</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 16px;
+            font-family: -apple-system, sans-serif;
+            background: #121212;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+
+        .badge {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            background: #2a2a2a;
+            color: #aaa;
+            margin-bottom: 12px;
+        }
+
+        .panel {
+            background: #1e1e1e;
+            border-radius: 12px;
+            padding: 14px;
+            width: 90%;
+            max-width: 400px;
+            margin-bottom: 12px;
+            text-align: left;
+        }
+
+        .panel div {
+            margin: 7px 0;
+            font-size: 15px;
+        }
+
+        .val {
+            font-family: monospace;
+            font-size: 19px;
+            font-weight: bold;
+        }
+
+        .g {
+            color: #4CAF50;
+        }
+
+        .o {
+            color: #FF9500;
+        }
+
+        .gr {
+            color: #888;
+        }
+
+        .bar-wrap {
+            margin-top: 10px;
+        }
+
+        .bar {
+            height: 10px;
+            background: #333;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: #4CAF50;
+            width: 0%;
+            transition: width .08s;
+        }
+
+        .calpanel {
+            background: #1a2a1a;
+            border: 1px solid #4CAF50;
+            border-radius: 12px;
+            padding: 14px;
+            width: 90%;
+            max-width: 400px;
+            margin-bottom: 12px;
+        }
+
+        .calpanel p {
+            font-size: 14px;
+            color: #aaa;
+            margin: 0 0 10px;
+        }
+
+        button {
+            border: none;
+            padding: 13px 24px;
+            font-size: 17px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            width: 90%;
+            max-width: 400px;
+            margin-bottom: 8px;
+        }
+
+        #startBtn {
+            background: #007AFF;
+            color: #fff;
+        }
+
+        #startBtn.on {
+            background: #555;
+            color: #ccc;
+        }
+
+        #calBtn {
+            background: #4CAF50;
+            color: #fff;
+        }
+
+        #permBtn {
+            background: #FF9500;
+            color: #fff;
+            display: none;
+        }
+
+        #status {
+            font-size: 13px;
+            color: #aaa;
+        }
+
+        .note {
+            font-size: 11px;
+            color: #555;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>UE AR Remote Sensor 🧭</h1>
+    <div class="badge" id="modeEl">Mode: Waiting...</div>
+
+    <!-- ① 校准面板（初始隐藏） -->
+    <div class="calpanel" id="calPanel" style="display:none">
+        <p>📐 <strong>校准正方向</strong><br>
+            面朝 UE 场景中的<strong>前方（+X 方向）</strong>，<br>
+            然后点击下方按钮确认。</p>
+        <button id="calBtn">✅ 确认正方向（校准）</button>
+    </div>
+
+    <!-- ② 数据面板（校准后显示） -->
+    <div class="panel" id="dataPanel" style="display:none">
+        <div>朝向 (相对): <span id="dYaw" class="val g">0.0</span>°</div>
+        <div>走路状态: <span id="dWalk" class="val gr">静止</span>
+            &nbsp; 步数: <span id="dSteps" class="val g">0</span></div>
+        <div class="bar-wrap">动态加速度:
+            <div class="bar">
+                <div class="bar-fill" id="accBar"></div>
+            </div>
+        </div>
+        <div class="note">正前方 = 0°，向右 = 正值，向左 = 负值。</div>
+    </div>
+
+    <button id="permBtn">📱 Allow Sensor Access (iOS)</button>
+    <button id="startBtn">START TRACKING</button>
+    <div id="status">Connecting to Bridge...</div>
+
+    <script>
+        // ── WebSocket ──────────────────────────────────────────────────────────
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        let ws = new WebSocket(wsProto + '//' + location.host);
+        const statusEl = document.getElementById('status');
+        const modeEl = document.getElementById('modeEl');
+        const startBtn = document.getElementById('startBtn');
+        const permBtn = document.getElementById('permBtn');
+        const calPanel = document.getElementById('calPanel');
+        const calBtn = document.getElementById('calBtn');
+        const dataPanel = document.getElementById('dataPanel');
+
+        ws.onopen = () => statusEl.innerText = '✅ Connected to PC Bridge!';
+        ws.onerror = () => { statusEl.innerText = '❌ Bridge Error'; statusEl.style.color = '#f55'; };
+        ws.onclose = () => statusEl.innerText = 'Disconnected. Refresh page.';
+
+        // ── 校准 ──────────────────────────────────────────────────────────────
+        let yawOffset = null;   // 校准时记录的 alpha（设备绝对朝向）
+        let rawAlpha = 0;      // deviceorientation 的原始 alpha
+
+        // 计算相对 Yaw，归一化到 -180~180
+        function relativeYaw() {
+            if (yawOffset === null) return 0;
+            let rel = rawAlpha - yawOffset;
+            // 归一化
+            while (rel > 180) rel -= 360;
+            while (rel < -180) rel += 360;
+            // alpha 顺时针增大，UE Yaw 也是顺时针正方向，直接取正
+            // 用户要求反转：
+            return -rel;
+        }
+
+        calBtn.addEventListener('click', () => {
+            yawOffset = rawAlpha;
+            calPanel.style.display = 'none';
+            dataPanel.style.display = 'block';
+            statusEl.innerText = '✅ 校准完成！拿着手机走路来控制 UE 角色。';
+            modeEl.innerText = 'Mode: Tracking (Calibrated)';
+        });
+
+        // ── 状态 ──────────────────────────────────────────────────────────────
+        let tracking = false;
+        let stepCount = 0;
+
+        // ── 步伐检测参数 ───────────────────────────────────────────────────────
+        const GRAVITY_ALPHA = 0.9;   // 低通滤波系数（越大越平滑）
+        const STEP_THRESHOLD = 2.0;   // 动态加速度峰值阈值（m/s²）
+        const STEP_MIN_INTERVAL = 300;   // 最小步伐间隔（ms）
+        const STOP_DELAY = 600;   // 停止延迟（ms）
+
+        let gravX = 0, gravY = 0, gravZ = 9.8;
+        let lastStepTime = 0, lastMoveTime = 0;
+        let onPeak = false;
+
+        function detectStep(ax, ay, az) {
+            gravX = GRAVITY_ALPHA * gravX + (1 - GRAVITY_ALPHA) * ax;
+            gravY = GRAVITY_ALPHA * gravY + (1 - GRAVITY_ALPHA) * ay;
+            gravZ = GRAVITY_ALPHA * gravZ + (1 - GRAVITY_ALPHA) * az;
+
+            const dynMag = Math.sqrt(
+                (ax - gravX) ** 2 + (ay - gravY) ** 2 + (az - gravZ) ** 2
+            );
+
+            document.getElementById('accBar').style.width =
+                Math.min(dynMag / 5 * 100, 100) + '%';
+
+            const now = performance.now();
+            if (dynMag > STEP_THRESHOLD) {
+                onPeak = true;
+            } else if (onPeak) {
+                onPeak = false;
+                if (now - lastStepTime > STEP_MIN_INTERVAL) {
+                    lastStepTime = now;
+                    lastMoveTime = now;
+                    stepCount++;
+                    document.getElementById('dSteps').innerText = stepCount;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // ── 发送 ──────────────────────────────────────────────────────────────
+        function send(speed) {
+            const yaw = relativeYaw();
+            const walking = speed > 0;
+
+            document.getElementById('dYaw').innerText = yaw.toFixed(1);
+            const walkEl = document.getElementById('dWalk');
+            walkEl.innerText = walking ? '🚶 走路中' : '静止';
+            walkEl.className = 'val ' + (walking ? 'g' : 'gr');
+
+            if (ws.readyState === WebSocket.OPEN) {
+                // x = speed (0或1), y/z = 0, yaw = 相对角度
+                ws.send(JSON.stringify({ x: speed, y: 0, z: 0, yaw: yaw }));
+            }
+        }
+
+        // ── DeviceOrientation ─────────────────────────────────────────────────
+        window.addEventListener('deviceorientation', (e) => {
+            if (e.alpha == null) return;
+            rawAlpha = e.alpha;
+            // 校准完成后且正在追踪时实时发送朝向（即使没走路）
+            if (tracking && yawOffset !== null) {
+                // 仅当停止走路时，也要持续发送以更新朝向
+                const now = performance.now();
+                if (now - lastMoveTime > STOP_DELAY) {
+                    send(0);
+                }
+            }
+        }, true);
+
+        // ── DeviceMotion ──────────────────────────────────────────────────────
+        window.addEventListener('devicemotion', (e) => {
+            if (!tracking || yawOffset === null) return;
+            const acc = e.accelerationIncludingGravity;
+            if (!acc || acc.x == null) return;
+
+            const stepped = detectStep(acc.x, acc.y, acc.z);
+            if (stepped) send(1.0);
+        }, true);
+
+        // ── 定时器：停止检测 ──────────────────────────────────────────────────
+        let stopTimer = null;
+        function startTimers() {
+            stopTimer = setInterval(() => {
+                if (!tracking || yawOffset === null) return;
+                if (performance.now() - lastMoveTime > STOP_DELAY) {
+                    send(0);
+                }
+            }, 100);
+        }
+
+        // ── iOS 权限 ──────────────────────────────────────────────────────────
+        const needsPerm = () => typeof DeviceMotionEvent?.requestPermission === 'function';
+
+        async function requestIOS() {
+            const m = await DeviceMotionEvent.requestPermission().catch(() => 'denied');
+            const o = await DeviceOrientationEvent.requestPermission().catch(() => 'denied');
+            if (m === 'granted' && o === 'granted') {
+                permBtn.style.display = 'none';
+                startBtn.style.display = 'block';
+                doStart();
+            } else {
+                alert('设置 → Safari → 动作与方向访问 → 允许');
+            }
+        }
+
+        // ── WebXR ARCore（如果可用则直接上位） ───────────────────────────────
+        function q2yaw(q) {
+            return Math.atan2(2 * (q.w * q.y + q.z * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)) * 180 / Math.PI;
+        }
+
+        async function tryWebXR() {
+            if (!navigator.xr) return false;
+            const ok = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+            if (!ok) return false;
+            try {
+                const sess = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local'] });
+                const space = await sess.requestReferenceSpace('local');
+                sess.addEventListener('end', doStop);
+                modeEl.innerText = 'Mode: WebXR ARCore ✅';
+
+                // ARCore 模式无需校准（使用设备坐标系）
+                calPanel.style.display = 'none';
+                dataPanel.style.display = 'block';
+                yawOffset = 0;
+
+                let lastPos = null, xrCalYaw = null;
+                function frame(_, f) {
+                    if (!tracking) return;
+                    sess.requestAnimationFrame(frame);
+                    const pose = f.getViewerPose(space);
+                    if (!pose) return;
+                    const p = pose.transform.position;
+                    const q = pose.transform.orientation;
+                    const absYaw = -q2yaw(q);
+
+                    if (xrCalYaw === null) xrCalYaw = absYaw; // 首帧校准
+                    const relYaw = absYaw - xrCalYaw;
+
+                    let speed = 0;
+                    if (lastPos) {
+                        const d = Math.sqrt((p.x - lastPos.x) ** 2 + (p.z - lastPos.z) ** 2);
+                        if (d > 0.01) { speed = 1; lastMoveTime = performance.now(); }
+                    }
+                    lastPos = { x: p.x, z: p.z };
+
+                    document.getElementById('dYaw').innerText = relYaw.toFixed(1);
+                    if (ws.readyState === WebSocket.OPEN)
+                        ws.send(JSON.stringify({ x: speed, y: 0, z: 0, yaw: relYaw }));
+                }
+                sess.requestAnimationFrame(frame);
+                return true;
+            } catch { return false; }
+        }
+
+        // ── 主控 ─────────────────────────────────────────────────────────────
+        async function doStart() {
+            startBtn.disabled = true;
+            modeEl.innerText = 'Mode: Starting...';
+
+            stepCount = 0; lastMoveTime = performance.now();
+            document.getElementById('dSteps').innerText = '0';
+            onPeak = false;
+
+            const xrOk = await tryWebXR();
+            if (!xrOk) {
+                // 非 ARCore：先显示校准步骤
+                modeEl.innerText = 'Mode: DeviceOrientation (Step Detection)';
+                calPanel.style.display = 'block';
+                dataPanel.style.display = 'none';
+                statusEl.innerText = '请先校准正方向（见上方说明）';
+            }
+
+            startTimers();
+            tracking = true;
+            startBtn.disabled = false;
+            startBtn.innerText = 'STOP TRACKING';
+            startBtn.classList.add('on');
+        }
+
+        function doStop() {
+            tracking = false;
+            if (stopTimer) { clearInterval(stopTimer); stopTimer = null; }
+            yawOffset = null;
+            startBtn.innerText = 'START TRACKING';
+            startBtn.classList.remove('on');
+            calPanel.style.display = 'none';
+            dataPanel.style.display = 'none';
+            modeEl.innerText = 'Mode: Stopped';
+        }
+
+        startBtn.addEventListener('click', () => {
+            if (tracking) { doStop(); return; }
+            if (needsPerm()) {
+                startBtn.style.display = 'none';
+                permBtn.style.display = 'block';
+                return;
+            }
+            doStart();
+        });
+        permBtn.addEventListener('click', requestIOS);
+        if (needsPerm()) startBtn.innerText = 'TAP TO START (iOS)';
+    </script>
+</body>
+
+</html>

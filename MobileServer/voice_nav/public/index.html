@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Voice Nav</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            padding: 16px;
+            font-family: -apple-system, sans-serif;
+            background: #0d1117;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 8px 0 4px;
+        }
+
+        .badge {
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            background: #21262d;
+            color: #8b949e;
+            margin-bottom: 14px;
+        }
+
+        .status-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 12px 16px;
+            width: 100%;
+            max-width: 380px;
+            margin-bottom: 12px;
+        }
+
+        .status-box .lbl {
+            font-size: 11px;
+            color: #8b949e;
+            margin-bottom: 4px;
+        }
+
+        #statusText {
+            font-size: 17px;
+            font-weight: 600;
+            color: #58a6ff;
+        }
+
+        #historyList {
+            list-style: none;
+            margin: 10px 0 0;
+            padding: 0;
+            font-size: 13px;
+            color: #8b949e;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        #historyList li {
+            padding: 3px 0;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .btn-wrap {
+            margin: 16px 0;
+        }
+
+        #talkBtn {
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            border: none;
+            font-size: 48px;
+            cursor: pointer;
+            user-select: none;
+            background: linear-gradient(135deg, #1f6feb, #388bfd);
+            box-shadow: 0 0 0 0 rgba(56, 139, 253, .5);
+            transition: transform .12s, box-shadow .12s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #talkBtn.recording {
+            background: linear-gradient(135deg, #b91c1c, #ef4444);
+            transform: scale(1.08);
+            box-shadow: 0 0 0 20px rgba(239, 68, 68, .25);
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                box-shadow: 0 0 0 12px rgba(239, 68, 68, .2);
+            }
+
+            50% {
+                box-shadow: 0 0 0 24px rgba(239, 68, 68, .05);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🧭 手机语音中心</h1>
+    <div class="badge" id="serverBadge">ws://...</div>
+
+    <div class="status-box">
+        <div class="lbl">状态</div>
+        <div id="statusText">连接中...</div>
+        <ul id="historyList"></ul>
+    </div>
+
+    <div class="btn-wrap">
+        <button id="talkBtn" ontouchstart="startRec(event)" ontouchend="stopRec(event)" onmousedown="startRec(event)"
+            onmouseup="stopRec(event)">🎤</button>
+        <div style="font-size:12px; color:#888; text-align:center; margin-top:8px;">按住说话</div>
+    </div>
+
+    <script>
+        const wsUrl = `ws://${location.host}/ws`;
+        let ws = null, wsReady = false;
+
+        function connect() {
+            document.getElementById('serverBadge').innerText = wsUrl;
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => { wsReady = true; setStatus('按住说话'); };
+            ws.onclose = () => { wsReady = false; setStatus('连接断开...'); setTimeout(connect, 3000); };
+            ws.onmessage = (e) => {
+                try {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'status') setStatus(msg.text);
+                    if (msg.type === 'tts') speak(msg.text);
+                    if (msg.type === 'nav') {
+                        const li = document.createElement('li');
+                        li.innerText = `${msg.command.action} -> ${msg.command.target || ''}`;
+                        const ul = document.getElementById('historyList');
+                        ul.insertBefore(li, ul.firstChild);
+                    }
+                } catch { }
+            };
+        }
+        connect();
+
+        function setStatus(text) { document.getElementById('statusText').innerText = text; }
+
+        function speak(text) {
+            if (!('speechSynthesis' in window)) return;
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = 'zh-CN'; u.rate = 1.05;
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(u);
+        }
+
+        let mediaStream = null, audioCtx = null, processor = null, recording = false;
+
+        async function startRec(e) {
+            e.preventDefault();
+            if (recording || !wsReady) return;
+            recording = true;
+            document.getElementById('talkBtn').classList.add('recording');
+            setStatus('🎙️ 录音中...');
+
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+                const source = audioCtx.createMediaStreamSource(mediaStream);
+                processor = audioCtx.createScriptProcessor(4096, 1, 1);
+                processor.onaudioprocess = (ev) => {
+                    if (!recording) return;
+                    const f32 = ev.inputBuffer.getChannelData(0);
+                    const i16 = new Int16Array(f32.length);
+                    for (let i = 0; i < f32.length; i++) i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32768));
+                    if (ws?.readyState === WebSocket.OPEN) ws.send(i16.buffer);
+                };
+                source.connect(processor);
+                processor.connect(audioCtx.destination);
+            } catch (err) {
+                recording = false;
+                document.getElementById('talkBtn').classList.remove('recording');
+                setStatus('❌ 麦克风权限错误');
+            }
+        }
+
+        function stopRec(e) {
+            e.preventDefault();
+            if (!recording) return;
+            recording = false;
+            document.getElementById('talkBtn').classList.remove('recording');
+            setStatus('识别中...');
+
+            if (processor) { processor.disconnect(); processor = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+            if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'end_of_speech' }));
+        }
+        document.getElementById('talkBtn').addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+    </script>
+</body>
+
+</html>

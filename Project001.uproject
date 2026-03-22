@@ -1,0 +1,59 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.7",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "Project001",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "LidarPointCloud",
+			"Enabled": true,
+			"SupportedTargetPlatforms": [
+				"Win64",
+				"Mac",
+				"Linux"
+			]
+		},
+		{
+			"Name": "AppleARKit",
+			"Enabled": false,
+			"Optional": true,
+			"SupportedTargetPlatforms": [
+				"IOS",
+				"Mac"
+			]
+		},
+		{
+			"Name": "GoogleARCore",
+			"Enabled": false,
+			"Optional": true,
+			"SupportedTargetPlatforms": [
+				"Android"
+			]
+		},
+		{
+			"Name": "UnrealMCP",
+			"Enabled": false
+		},
+		{
+			"Name": "TextToSpeech",
+			"Enabled": true
+		}
+	]
+}

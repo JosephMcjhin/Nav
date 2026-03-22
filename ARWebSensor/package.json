@@ -1,0 +1,14 @@
+{
+  "name": "ar-web-sensor",
+  "version": "1.0.0",
+  "description": "WebXR to UE UDP relay",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "selfsigned": "^2.1.1",
+    "ws": "^8.13.0"
+  }
+}
