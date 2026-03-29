@@ -35,6 +35,7 @@ def log_all_requests():
 
 # ── Configuration ───────────────────────────────────────────────────────────────
 ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
+HARDCODE_CALIBRATION_CORNERS = True  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(8,0)
 
 # ── Shared state ───────────────────────────────────────────────────────────────
 active_ws: set = set()
@@ -87,6 +88,18 @@ def calibrate_point():
     ue_x = float(data.get("x", 0))
     ue_y = float(data.get("y", 0))
     point_index = data.get("index", None)
+
+    # ==== [修改] 强行覆盖实际 UWB 测算位置，用于桌面方便测试 ====
+    if HARDCODE_CALIBRATION_CORNERS:
+        if point_index == 0:
+            uwb_calibrator.update_uwb_pos(0.0, 0.0)
+            if ENABLE_VERBOSE_LOGS:
+                log.info("【测试专用】已经将 采点1 的其实际 UWB 基站位置强行修正锁定为 (0.0, 0.0)")
+        elif point_index == 1:
+            uwb_calibrator.update_uwb_pos(8.0, 0.0)
+            if ENABLE_VERBOSE_LOGS:
+                log.info("【测试专用】已经将 采点2 的其实际 UWB 基站位置强行修正锁定为 (8.0, 0.0)")
+    # ==============================================================
 
     valid_count, msg = uwb_calibrator.add_calibration_point(ue_x, ue_y, point_index)
     if "No UWB signal" in msg:
@@ -226,16 +239,9 @@ def _udp_uwb_listener(port: int = 9003):
             
             payload = json.loads(raw_text)
             
-            if payload.get("name") == "Device" and "data" in payload:
-                device_data = payload["data"]
-                device_name = device_data.get("name", "")
-                
-                # 过滤逻辑：只有名字以 T 开头（代表 Tag）的才处理，U 开头（代表 UWB Anchor）则忽略
-                if not device_name.startswith("T"):
-                    continue
-                
-                coord_obj = device_data.get("coordinate", {})
-                pos_array = coord_obj.get("coords")
+            if payload.get("name") == "Pos" and payload.get("deviceName", "").startswith("T"):
+                device_data = payload.get("data", {})
+                pos_array = device_data.get("pos")
                 
                 if pos_array and len(pos_array) >= 2:
                     current_x, current_y = float(pos_array[0]), float(pos_array[1])

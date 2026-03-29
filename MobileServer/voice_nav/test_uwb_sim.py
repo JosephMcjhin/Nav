@@ -84,16 +84,11 @@ def start_simulation():
                 tag_uwb_y = 0.0
             
             payload = {
-                "name": "Device",
+                "name": "Pos",
+                "deviceName": "T1",
                 "uid": "sim-tag-001",
                 "data": {
-                    "type": 2,
-                    "online": True,
-                    "uid": "sim-tag-001",
-                    "coordinate": {
-                        "coords": [tag_uwb_x, tag_uwb_y, 0.0]
-                    },
-                    "name": "T1"  # 必须以 T 开头才能被识别
+                    "pos": [tag_uwb_x, tag_uwb_y, 0.0]
                 }
             }
             
