@@ -30,9 +30,11 @@ sock = Sock(app)
 
 @app.before_request
 def log_all_requests():
-    pass
-    # if request.path != "/":
-    #     log.info(f"[HTTP Request] {request.method} {request.path} | Data: {request.get_data(as_text=True)}")
+    if ENABLE_VERBOSE_LOGS and request.path != "/":
+        log.info(f"[HTTP Request] {request.method} {request.path} | Data: {request.get_data(as_text=True)}")
+
+# ── Configuration ───────────────────────────────────────────────────────────────
+ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
 
 # ── Shared state ───────────────────────────────────────────────────────────────
 active_ws: set = set()
@@ -61,8 +63,9 @@ def index():
 def beacon_inspect():
     """Debug: log and echo back the exact raw JSON that UBeacon Tools sends."""
     raw = request.get_json(force=True, silent=True) or {}
-    # log.info(f"[BEACON INSPECT] Fields: {list(raw.keys())}")
-    # log.info(f"[BEACON INSPECT] Data:   {json.dumps(raw, ensure_ascii=False)}")
+    if ENABLE_VERBOSE_LOGS:
+        log.info(f"[BEACON INSPECT] Fields: {list(raw.keys())}")
+        log.info(f"[BEACON INSPECT] Data:   {json.dumps(raw, ensure_ascii=False)}")
     return jsonify({"received": raw, "fields": list(raw.keys())})
 
 
@@ -72,7 +75,8 @@ def set_target():
     data = request.get_json(force=True)
     x, y, z = float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("z", 0))
     broadcast({"type": "set_target", "x": x, "y": y, "z": z})
-    # log.info(f"set_target → x={x} y={y} z={z} to {len(active_ws)} clients")
+    if ENABLE_VERBOSE_LOGS:
+        log.info(f"set_target → x={x} y={y} z={z} to {len(active_ws)} clients")
     return jsonify({"status": "ok", "clients": len(active_ws)})
 
 
@@ -88,7 +92,8 @@ def calibrate_point():
     if "No UWB signal" in msg:
         return jsonify({"status": "error", "message": msg}), 400
         
-    # log.info(msg)
+    if ENABLE_VERBOSE_LOGS:
+        log.info(msg)
     return jsonify({"status": "ok", "captured_count": valid_count})
 
 
@@ -97,7 +102,8 @@ def calibrate_solve():
     """Solve the 2-point Transformation matrix mapping UWB to Unreal Engine."""
     matrix, msg = uwb_calibrator.solve_transform()
     if matrix:
-        # log.info(msg)
+        if ENABLE_VERBOSE_LOGS:
+            log.info(msg)
         return jsonify({"status": "ok", "matrix": {k: (list(v) if isinstance(v, tuple) else v) for k, v in matrix.items()}})
     else:
         return jsonify({"status": "error", "message": msg})
@@ -115,7 +121,8 @@ def calibrate_status():
 @app.route("/api/calibrate/clear", methods=["POST"])
 def calibrate_clear():
     uwb_calibrator.clear()
-    # log.info("Calibration cleared.")
+    if ENABLE_VERBOSE_LOGS:
+        log.info("Calibration cleared.")
     return jsonify({"status": "ok"})
 
 
@@ -214,7 +221,8 @@ def _udp_uwb_listener(port: int = 9003):
             data, addr = sock.recvfrom(4096)
             raw_text = data.decode("utf-8", errors="ignore").strip()
             # 增加日志：打印收到的完整UDP信号及来源端口
-            # log.info(f"[UDP] 从 {addr} 收到信号: {raw_text}")
+            if ENABLE_VERBOSE_LOGS:
+                log.info(f"[UDP] 从 {addr} 收到信号: {raw_text}")
             
             payload = json.loads(raw_text)
             

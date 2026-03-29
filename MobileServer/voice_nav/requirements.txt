@@ -10,6 +10,7 @@ numpy>=1.24.0
 # Cloud TTS and Audio processing
 edge-tts
 pydub
+audioop-lts
 
 # Web Server Dependencies
 flask>=3.0
