@@ -111,6 +111,7 @@ void UVoiceStreamComponent::SendEndOfSpeech() {
 }
 
 void UVoiceStreamComponent::RequestTTS(const FString &Text) {
+
   if (UServerConnectionComponent *Conn =
           GetOwner()->FindComponentByClass<UServerConnectionComponent>()) {
     FString JsonStr =
@@ -133,12 +134,28 @@ void UVoiceStreamComponent::HandleIncomingTTSAudio(const void *Data,
     TTSWave->bLooping = false;
   }
 
+  float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+  float Duration = (float)Size / 32000.0f;
+
+  if (CurrentTime < TTSFinishTime) {
+    // 正在播放中，排队叠加时间，不重置音频缓冲
+    TTSFinishTime += Duration;
+  } else {
+    // 已经播完或从未播放，重置时间并清空之前的缓冲
+    TTSFinishTime = CurrentTime + Duration + 0.2f;
+    if (TTSWave) {
+      TTSWave->ResetAudio();
+    }
+  }
+
+  // 追加音频数据到缓冲区尾部
   TTSWave->QueueAudio((const uint8 *)Data, Size);
 
   if (TTSAudioComp) {
     if (TTSAudioComp->Sound != TTSWave) {
       TTSAudioComp->SetSound(TTSWave);
     }
+    // 防止重复触发播放
     if (!TTSAudioComp->IsPlaying()) {
       TTSAudioComp->Play();
     }

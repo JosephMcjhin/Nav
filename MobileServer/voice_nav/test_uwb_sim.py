@@ -4,17 +4,34 @@ import time
 import math
 import random
 import threading
+import urllib.request
 
 UDP_TARGET_IP = "127.0.0.1"
 UDP_TARGET_PORT = 9003
+STATUS_URL = "http://127.0.0.1:8090/api/calibrate/status"
 
-# Simulate Anchors and Transform Matrix
-# In a real situation, UWB system solves Tag pos based on distances to Anchors.
-# Here we just generate a random transform matrix mapping UE (cm) to UWB (m), 
-# randomize anchors for visualization, and simulate tag walking.
+sim_state = 0 # 0: Point 1 (Bottom Left), 1: Point 2 (Bottom Right), 2: Moving
+
+def poll_status():
+    """Poll the web_app for calibration status to automatically advance simulation states."""
+    global sim_state
+    while True:
+        try:
+            req = urllib.request.Request(STATUS_URL)
+            with urllib.request.urlopen(req, timeout=1) as response:
+                data = json.loads(response.read().decode())
+                if data.get("is_calibrated"):
+                    sim_state = 2
+                elif data.get("points", 0) >= 1:
+                    sim_state = 1
+                else:
+                    sim_state = 0
+        except Exception:
+            pass
+        time.sleep(1.0)
+
 
 def generate_random_env():
-    # Random anchors
     anchors = [
         (random.uniform(0, 10), random.uniform(0, 10)),
         (random.uniform(10, 20), random.uniform(0, 10)),
@@ -22,13 +39,12 @@ def generate_random_env():
     ]
     print(f"[Sim] Generated 3 Random Anchors in UWB space: {anchors}")
 
-    # Transform: UE = S * R * UWB + T
-    scale = random.uniform(80.0, 120.0) # approx 1m = 100cm
+    scale = random.uniform(80.0, 120.0) 
     theta = random.uniform(-math.pi, math.pi)
     tx = random.uniform(-500, 500)
     ty = random.uniform(-500, 500)
 
-    print(f"[Sim] Real (hidden) Transform Matrix => Scale: {scale:.2f}, Rotation: {math.degrees(theta):.2f} deg, Translation: ({tx:.1f}, {ty:.1f})")
+    print(f"[Sim] Real Transform Matrix => Scale: {scale:.2f}, Theta: {math.degrees(theta):.2f} deg, Translate: ({tx:.1f}, {ty:.1f})")
 
     def uwb_to_ue(uwb_x, uwb_y):
         rx = uwb_x * math.cos(theta) - uwb_y * math.sin(theta)
@@ -43,26 +59,41 @@ def start_simulation():
     
     uwb_to_ue_func = generate_random_env()
 
+    # Start the polling thread
+    threading.Thread(target=poll_status, daemon=True).start()
+
     start_time = time.time()
-    speed_mps = 1.5
+    speed_mps = 3
     update_rate_hz = 10
 
     try:
         while True:
             elapsed = time.time() - start_time
             
-            # Tag moves back and forth in a single direction (X axis) for 3 meters
-            # UWB space units are meters. 10.0m to 13.0m loop.
-            tag_uwb_x = 10.0 + 1.5 + 1.5 * math.cos(elapsed * speed_mps / 3.0)
-            tag_uwb_y = 10.0
+            if sim_state == 0:
+                # Bottom-Left (Point 1)
+                tag_uwb_x = 0.0
+                tag_uwb_y = 0.0
+            elif sim_state == 1:
+                # Bottom-Right (Point 2)
+                tag_uwb_x = 10.0
+                tag_uwb_y = 0.0
+            else:
+                # Moving back and forth (X goes from 0.0 to 10.0)
+                tag_uwb_x = 5.0 + 5.0 * math.cos(elapsed * speed_mps / 3.0)
+                tag_uwb_y = 0.0
             
             payload = {
-                "name": "Pos",
+                "name": "Device",
                 "uid": "sim-tag-001",
                 "data": {
-                    "mapId": 1,
-                    "pos": [tag_uwb_x, tag_uwb_y, 0.0],
-                    "time": int(time.time() * 1000)
+                    "type": 2,
+                    "online": True,
+                    "uid": "sim-tag-001",
+                    "coordinate": {
+                        "coords": [tag_uwb_x, tag_uwb_y, 0.0]
+                    },
+                    "name": "T1"  # 必须以 T 开头才能被识别
                 }
             }
             
@@ -71,9 +102,9 @@ def start_simulation():
             
             ue_target = uwb_to_ue_func(tag_uwb_x, tag_uwb_y)
             
-            # Only print every 1 second to avoid spam
             if int(elapsed * update_rate_hz) % (update_rate_hz) == 0:
-                print(f"[Sim] Tag at UWB({tag_uwb_x:.2f}, {tag_uwb_y:.2f}) -> Should move to UE({ue_target[0]:.0f}, {ue_target[1]:.0f})")
+                state_str = ["P1 (Bottom-Left)", "P2 (Bottom-Right)", "Moving"][sim_state]
+                print(f"[Sim] [{state_str}] UWB({tag_uwb_x:.2f}, {tag_uwb_y:.2f}) -> Should move to UE({ue_target[0]:.0f}, {ue_target[1]:.0f})")
             
             time.sleep(1.0 / update_rate_hz)
             
@@ -87,11 +118,11 @@ if __name__ == "__main__":
     print("==========================================================")
     print("1. Start the web_app.py server.")
     print("2. Run the Unreal Engine project.")
-    print("3. When you are ready, use the UE Calibration UI:")
-    print("   - Wait for the Tag to reach a desired spot (monitor logs).")
-    print("   - Move Character to that spot and click 'Capture 1'.")
-    print("   - Wait for Tag to move to another spot.")
-    print("   - Move Character to that second spot and click 'Capture 2'.")
-    print("   - Click 'Solve'. The Character should now follow the Tag!")
+    print("3. Use the UE Calibration UI:")
+    print("   - The Tag is currently holding at 'Bottom-Left'.")
+    print("   - Move Character to the FIRST spot and click 'Capture 1'.")
+    print("   - The Tag will automatically jump to 'Bottom-Right'.")
+    print("   - Move Character to the SECOND spot and click 'Capture 2'.")
+    print("   - Click 'Solve'. The Tag will automatically start moving!")
     print("==========================================================\n")
     start_simulation()

@@ -10,7 +10,6 @@
 #include "GameFramework/Character.h"
 #include "ServerConnectionComponent.h"
 
-
 #include "BeaconCalibrationWidget.generated.h"
 
 /**
@@ -30,27 +29,46 @@ class PROJECT001_API UBeaconCalibrationWidget : public UUserWidget {
 
 public:
   // ─── Bound UMG Widgets (name them the same in the Blueprint) ───────────
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnCapture1;
 
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnCapture2;
 
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnSolve;
 
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnReset;
 
+  // Toolbar toggling
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnToggleToolbar;
+
+  UPROPERTY(meta = (BindWidgetOptional))
+  class UWidget *ToolbarContainer;
+
+  // Voice Recording
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnSpeak;
+
+  // Server Connection
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnConnect;
+
   // Status labels
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UTextBlock *TxtStatus;
 
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UTextBlock *TxtPoint1;
 
-  UPROPERTY(meta = (BindWidget))
+  UPROPERTY(meta = (BindWidgetOptional))
   UTextBlock *TxtPoint2;
+
+  // Server IP input
+  UPROPERTY(meta = (BindWidgetOptional))
+  class UEditableTextBox *TxtServerIP;
 
   // ─── Public API ────────────────────────────────────────────────────────
 
@@ -97,6 +115,7 @@ private:
 
   void RefreshUI();
   void SetStatus(const FString &Msg);
+  void SwitchUIState(int32 State);
 
   // HTTP helper – fires-and-forgets a POST to the server
   void HttpPost(const FString &RelPath, const FString &JsonBody,
@@ -112,4 +131,15 @@ private:
   void OnSolve();
   UFUNCTION()
   void OnReset();
+
+  UFUNCTION()
+  void OnToggleToolbar();
+
+  UFUNCTION()
+  void OnSpeakPressed();
+  UFUNCTION()
+  void OnSpeakReleased();
+
+  UFUNCTION()
+  void OnConnectClicked();
 };

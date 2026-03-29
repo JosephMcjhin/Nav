@@ -79,4 +79,6 @@ private:
 
   UPROPERTY(Transient)
   UAudioComponent *TTSAudioComp;
+
+  float TTSFinishTime = 0.0f;
 };

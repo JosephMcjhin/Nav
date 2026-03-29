@@ -1,104 +1,77 @@
 #include "UWBTargetComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
-#include "GameFramework/CharacterMovementComponent.h"
-#include "Kismet/KismetMathLibrary.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
+
 
 UUWBTargetComponent::UUWBTargetComponent() {
   PrimaryComponentTick.bCanEverTick = true;
-  PrimaryComponentTick.bStartWithTickEnabled = true;
 }
-
-void UUWBTargetComponent::BeginPlay() { Super::BeginPlay(); }
 
 void UUWBTargetComponent::TickComponent(
     float DeltaTime, ELevelTick TickType,
     FActorComponentTickFunction *ThisTickFunction) {
   Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-  if (!bHasTarget || !bIsCalibrated)
+  APawn *OwnerPawn = Cast<APawn>(GetOwner());
+  if (!OwnerPawn)
     return;
 
-  AActor *Owner = GetOwner();
-  if (!Owner)
-    return;
+  // --- Force built-in Virtual Joystick to drive the character (Fixes UE5
+  // Enhanced Input conflict) ---
+  if (APlayerController *PC =
+          Cast<APlayerController>(OwnerPawn->GetController())) {
+    float JoyY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);
+    float JoyX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);
+    if (FMath::Abs(JoyX) > 0.05f || FMath::Abs(JoyY) > 0.05f) {
+      if (PC->PlayerCameraManager) {
+        // 利用相机的真实渲染朝向（俯视时：相机的"上"就是地面的"前"）
+        FRotator CamRot = PC->PlayerCameraManager->GetCameraRotation();
+        FVector CamUp = FRotationMatrix(CamRot).GetUnitAxis(EAxis::Z);
+        FVector CamRight = FRotationMatrix(CamRot).GetUnitAxis(EAxis::Y);
 
-  FVector CurrentLoc = Owner->GetActorLocation();
-  FVector TargetLoc(TargetX, TargetY, CurrentLoc.Z);
-  FVector Delta = TargetLoc - CurrentLoc;
+        CamUp.Z = 0.0f;
+        CamRight.Z = 0.0f;
 
-  float DistSq = Delta.SizeSquared2D();
-
-  // Already close enough – nothing to do
-  if (DistSq < 16.f) // within ~4 cm
-    return;
-
-  float Dist = FMath::Sqrt(DistSq);
-
-  // Drive movement via CharacterMovementComponent so that CMC physics
-  // (gravity, collision, ground-following) work correctly instead of
-  // fighting against a raw SetActorLocation call.
-  ACharacter *Char = Cast<ACharacter>(Owner);
-  if (Char) {
-    // Normalized XY direction toward target
-    FVector Dir = Delta / Dist;
-    Dir.Z = 0.f;
-    Dir.Normalize();
-
-    if (MoveSpeed <= 0.f) {
-      // Instant/teleport mode — stay compatible with sensor snap
-      Owner->SetActorLocation(FVector(TargetLoc.X, TargetLoc.Y, CurrentLoc.Z),
-                              false, nullptr, ETeleportType::TeleportPhysics);
-    } else {
-      // Feed a scaled direction into CMC — this is identical to how
-      // NavCommandComponent drives the character via AddMovementInput.
-      // Scale: clamp so we don't overshoot when very close.
-      float Scale = FMath::Min(1.f, Dist / (MoveSpeed * DeltaTime + 1.f));
-      Char->AddMovementInput(Dir, Scale);
+        OwnerPawn->AddMovementInput(CamUp.GetSafeNormal(), JoyY);
+        OwnerPawn->AddMovementInput(CamRight.GetSafeNormal(), JoyX);
+      }
+      bHasTarget = false; // yield automatic pilot to manual control
     }
-  } else {
-    // Non-character actor: fall back to direct location set
-    FVector NewLoc;
-    if (MoveSpeed <= 0.f) {
-      NewLoc = TargetLoc;
-    } else {
-      float StepSize = MoveSpeed * DeltaTime;
-      FVector Dir = Delta / Dist;
-      NewLoc = (StepSize >= Dist) ? TargetLoc : CurrentLoc + Dir * StepSize;
-      NewLoc.Z = CurrentLoc.Z;
-    }
-    Owner->SetActorLocation(NewLoc, false, nullptr,
-                            ETeleportType::TeleportPhysics);
   }
 
-  // Debug display — using a member timer to avoid static variable issues
-  DebugTimer += DeltaTime;
-  if (DebugTimer >= 0.5f) {
-    DebugTimer = 0.f;
-    if (GEngine) {
-      GEngine->AddOnScreenDebugMessage(
-          3001, 1.f, FColor::Yellow,
-          FString::Printf(TEXT("[UWB] -> X:%.0f Y:%.0f  Dist:%.0f cm"), TargetX,
-                          TargetY, Dist));
-    }
+  if (!bHasTarget)
+    return;
+
+  FVector CurrentLoc = OwnerPawn->GetActorLocation();
+  FVector Direction =
+      FVector(TargetLocation.X, TargetLocation.Y, CurrentLoc.Z) - CurrentLoc;
+  Direction.Z = 0.0f; // Ignore Z axis
+
+  if (Direction.Size2D() > 10.0f) {
+    Direction.Normalize();
+    OwnerPawn->AddMovementInput(Direction, 1.0f);
+  } else {
+    bHasTarget = false;
   }
 }
 
 void UUWBTargetComponent::SetUWBTarget(float InX, float InY) {
-  TargetX = InX;
-  TargetY = InY;
-  bHasTarget = true;
-}
+  AActor *Owner = GetOwner();
+  if (!Owner)
+    return;
 
-void UUWBTargetComponent::SetCalibrated(bool bInCalibrated) {
-  if (bIsCalibrated != bInCalibrated) {
-    bIsCalibrated = bInCalibrated;
-    if (GEngine) {
-      GEngine->AddOnScreenDebugMessage(
-          3002, 5.f, bIsCalibrated ? FColor::Cyan : FColor::Orange,
-          FString::Printf(TEXT("[UWB] Calibration State: %s"),
-                          bIsCalibrated ? TEXT("READY") : TEXT("NOT READY")));
-    }
+  TargetLocation = FVector(InX, InY, Owner->GetActorLocation().Z);
+  bHasTarget = true;
+
+  if (GEngine) {
+    GEngine->AddOnScreenDebugMessage(
+        3001, 1.f, FColor::Yellow,
+        FString::Printf(TEXT("[UWB] Moving to target X:%.0f Y:%.0f"), InX,
+                        InY));
   }
 }

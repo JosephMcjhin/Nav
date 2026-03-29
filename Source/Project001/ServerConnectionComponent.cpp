@@ -2,7 +2,7 @@
 #include "Engine/Engine.h"
 #include "GameFramework/Character.h"
 #include "IWebSocket.h"
-#include "NavCommandComponent.h"
+#include "NavigationComponent.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UWBTargetComponent.h"
@@ -20,9 +20,9 @@ void UServerConnectionComponent::BeginPlay() {
   }
 
   // Connect automatically on game start!
-  if (!DefaultServerURL.IsEmpty()) {
-    ConnectToServer(DefaultServerURL);
-  }
+  // if (!DefaultServerURL.IsEmpty()) {
+  //  ConnectToServer(DefaultServerURL);
+  // }
 }
 
 void UServerConnectionComponent::EndPlay(
@@ -110,23 +110,18 @@ void UServerConnectionComponent::HandleJsonCommand(
         if (UUWBTargetComponent *UWBComp =
                 Owner->FindComponentByClass<UUWBTargetComponent>()) {
           UWBComp->SetUWBTarget(static_cast<float>(X), static_cast<float>(Y));
-
-          bool bCalibrated = false;
-          if (JsonObject->TryGetBoolField(TEXT("calibrated"), bCalibrated)) {
-            UWBComp->SetCalibrated(bCalibrated);
-          }
         }
 
         // Dispatch "navigate_to" to NavCommandComponent
-      } else if (MsgType == TEXT("navigate_to") || MsgType == TEXT("move_to")) {
+      } else if (MsgType == TEXT("navigate_to")) {
         FString DestString;
         if (!JsonObject->TryGetStringField(TEXT("destination"), DestString)) {
           JsonObject->TryGetStringField(TEXT("target"), DestString);
         }
         if (!DestString.IsEmpty()) {
-          if (UNavCommandComponent *NavComp =
-                  Owner->FindComponentByClass<UNavCommandComponent>()) {
-            NavComp->NavigateTo(FName(*DestString), true);
+          if (UNavigationComponent *NavComp =
+                  Owner->FindComponentByClass<UNavigationComponent>()) {
+            NavComp->NavigateTo(FName(*DestString));
           }
         }
       }
