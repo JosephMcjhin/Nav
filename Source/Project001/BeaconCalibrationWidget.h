@@ -15,8 +15,8 @@
 /**
  * UBeaconCalibrationWidget
  *
- *   1. Two-point UWB calibration (capture UE position + UWB coordinates)
- *   2. Triggering the server-side trilateration solve
+ *   1. Three-point UWB calibration (capture UE position + UWB coordinates)
+ *   2. Triggering the server-side affine-transform solve
  *   3. A virtual joystick for manually moving the character to each sample
  * point
  *
@@ -34,6 +34,9 @@ public:
 
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnCapture2;
+
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnCapture3;
 
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnSolve;
@@ -66,6 +69,9 @@ public:
   UPROPERTY(meta = (BindWidgetOptional))
   UTextBlock *TxtPoint2;
 
+  UPROPERTY(meta = (BindWidgetOptional))
+  UTextBlock *TxtPoint3;
+
   // Server IP input
   UPROPERTY(meta = (BindWidgetOptional))
   class UEditableTextBox *TxtServerIP;
@@ -76,7 +82,7 @@ public:
   UFUNCTION(BlueprintCallable, Category = "Beacon Calibration")
   void SetConnectionComponent(UServerConnectionComponent *InComponent);
 
-  /** Capture the current UE position as sample point N (1-2). */
+  /** Capture the current UE position as sample point N (1-3). */
   UFUNCTION(BlueprintCallable, Category = "Beacon Calibration")
   void CapturePoint(int32 PointIndex);
 
@@ -107,7 +113,7 @@ private:
   UServerConnectionComponent *ConnComp = nullptr;
 
   // Tracks which points have been captured (0 = not yet)
-  int32 CapturedFlags = 0; // bitmask: bit0=P1, bit1=P2
+  int32 CapturedFlags = 0; // bitmask: bit0=P1, bit1=P2, bit2=P3
 
   // Accumulated joystick axes, applied each tick
   float JoystickX = 0.f;
@@ -126,6 +132,8 @@ private:
   void OnCapture1();
   UFUNCTION()
   void OnCapture2();
+  UFUNCTION()
+  void OnCapture3();
 
   UFUNCTION()
   void OnSolve();

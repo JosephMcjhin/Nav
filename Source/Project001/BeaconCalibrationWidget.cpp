@@ -25,6 +25,9 @@ void UBeaconCalibrationWidget::NativeConstruct() {
   if (BtnCapture2)
     BtnCapture2->OnClicked.AddDynamic(this,
                                       &UBeaconCalibrationWidget::OnCapture2);
+  if (BtnCapture3)
+    BtnCapture3->OnClicked.AddDynamic(this,
+                                      &UBeaconCalibrationWidget::OnCapture3);
 
   if (BtnSolve)
     BtnSolve->OnClicked.AddDynamic(this, &UBeaconCalibrationWidget::OnSolve);
@@ -114,7 +117,7 @@ void UBeaconCalibrationWidget::SolveCalibration() {
 void UBeaconCalibrationWidget::ResetCalibration() {
   CapturedFlags = 0;
   HttpPost(TEXT("/api/calibrate/clear"), TEXT("{}"), nullptr);
-  SetStatus(TEXT("Reset. Please capture 2 points again."));
+  SetStatus(TEXT("Reset. Please capture 3 points again."));
   RefreshUI();
 }
 
@@ -138,10 +141,11 @@ void UBeaconCalibrationWidget::RefreshUI() {
   };
   UpdateLabel(TxtPoint1, 1, TEXT("Point 1"));
   UpdateLabel(TxtPoint2, 2, TEXT("Point 2"));
+  UpdateLabel(TxtPoint3, 4, TEXT("Point 3"));
 
-  // Enable Solve only when all 2 points are captured
+  // Enable Solve only when all 3 points are captured
   if (BtnSolve)
-    BtnSolve->SetIsEnabled((CapturedFlags & 0b11) == 0b11);
+    BtnSolve->SetIsEnabled((CapturedFlags & 0b111) == 0b111);
 }
 
 void UBeaconCalibrationWidget::SetStatus(const FString &Msg) {
@@ -169,6 +173,8 @@ void UBeaconCalibrationWidget::SwitchUIState(int32 State) {
     BtnCapture1->SetVisibility(V1);
   if (BtnCapture2)
     BtnCapture2->SetVisibility(V1);
+  if (BtnCapture3)
+    BtnCapture3->SetVisibility(V1);
   if (BtnSolve)
     BtnSolve->SetVisibility(V1);
   if (BtnReset)
@@ -177,6 +183,8 @@ void UBeaconCalibrationWidget::SwitchUIState(int32 State) {
     TxtPoint1->SetVisibility(V1);
   if (TxtPoint2)
     TxtPoint2->SetVisibility(V1);
+  if (TxtPoint3)
+    TxtPoint3->SetVisibility(V1);
   if (TxtStatus)
     TxtStatus->SetVisibility(V1);
 
@@ -213,6 +221,7 @@ void UBeaconCalibrationWidget::HttpPost(
 
 void UBeaconCalibrationWidget::OnCapture1() { CapturePoint(1); }
 void UBeaconCalibrationWidget::OnCapture2() { CapturePoint(2); }
+void UBeaconCalibrationWidget::OnCapture3() { CapturePoint(3); }
 
 void UBeaconCalibrationWidget::OnSolve() { SolveCalibration(); }
 void UBeaconCalibrationWidget::OnReset() { ResetCalibration(); }

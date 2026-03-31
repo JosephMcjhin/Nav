@@ -35,7 +35,7 @@ def log_all_requests():
 
 # ── Configuration ───────────────────────────────────────────────────────────────
 ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
-HARDCODE_CALIBRATION_CORNERS = True  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(8,0)
+HARDCODE_CALIBRATION_CORNERS = True  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(0, 8)
 
 # ── Shared state ───────────────────────────────────────────────────────────────
 active_ws: set = set()
@@ -83,7 +83,7 @@ def set_target():
 
 @app.route("/api/calibrate/point", methods=["POST"])
 def calibrate_point():
-    """Record current UE position and latest UWB position for 2-point calibration."""
+    """Record current UE position and latest UWB position for 3-point calibration."""
     data = request.get_json(force=True)
     ue_x = float(data.get("x", 0))
     ue_y = float(data.get("y", 0))
@@ -99,6 +99,10 @@ def calibrate_point():
             uwb_calibrator.update_uwb_pos(8.0, 0.0)
             if ENABLE_VERBOSE_LOGS:
                 log.info("【测试专用】已经将 采点2 的其实际 UWB 基站位置强行修正锁定为 (8.0, 0.0)")
+        elif point_index == 2:
+            uwb_calibrator.update_uwb_pos(0.0, 8.0)
+            if ENABLE_VERBOSE_LOGS:
+                log.info("【测试专用】已经将 采点3 的其实际 UWB 基站位置强行修正锁定为 (0.0, 8.0)")
     # ==============================================================
 
     valid_count, msg = uwb_calibrator.add_calibration_point(ue_x, ue_y, point_index)
@@ -112,7 +116,7 @@ def calibrate_point():
 
 @app.route("/api/calibrate/solve", methods=["POST"])
 def calibrate_solve():
-    """Solve the 2-point Transformation matrix mapping UWB to Unreal Engine."""
+    """Solve the 3-point affine transformation matrix mapping UWB to Unreal Engine."""
     matrix, msg = uwb_calibrator.solve_transform()
     if matrix:
         if ENABLE_VERBOSE_LOGS:
