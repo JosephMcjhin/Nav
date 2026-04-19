@@ -48,23 +48,30 @@ void UServerConnectionComponent::TickComponent(
       FVector Tilt, RotationRate, Gravity, Acceleration;
       PC->GetInputMotionState(Tilt, RotationRate, Gravity, Acceleration);
 
-      // Only send IMU data if it changed meaningfully (by at least 1 degree in
-      // any axis)
-      if (!Tilt.Equals(LastSentTilt, 1.0f)) {
-        LastSentTilt = Tilt;
+      // Convert from Radians ([-PI, PI]) to Degrees ([-180, 180])
+      // Using explicit conversion to ensure consistency across mobile platforms
+      float DegPitch = FMath::RadiansToDegrees(Tilt.X);
+      float DegYaw = FMath::RadiansToDegrees(Tilt.Y);
+      float DegRoll = FMath::RadiansToDegrees(Tilt.Z);
 
-        // Sending IMU pitch, yaw, roll JSON string (Tilt is in degrees)
-        FString Msg = FString::Printf(TEXT("{\"type\": \"imu\", \"pitch\": %f, "
-                                           "\"yaw\": %f, \"roll\": %f}"),
-                                      Tilt.X, Tilt.Y, Tilt.Z);
+      // Only send IMU data if it changed meaningfully (by at least 1 degree)
+      FVector DegTilt(DegPitch, DegYaw, DegRoll);
+      if (!DegTilt.Equals(LastSentTilt, 1.0f)) {
+        LastSentTilt = DegTilt;
+
+        FString Msg = FString::Printf(
+            TEXT("{\"type\": \"imu\", \"pitch\": %.2f, \"yaw\": %.2f, \"roll\": "
+                 "%.2f}"),
+            DegPitch, DegYaw, DegRoll);
         SendString(Msg);
       }
 
-      // Continuous on-screen debug print for sensor monitoring
+      // Professional HUD Display for Sensor Tuning
       if (GEngine) {
         GEngine->AddOnScreenDebugMessage(
-            3004, 0.1f, FColor::Yellow,
-            FString::Printf(TEXT("Current IMU Yaw: %.2f"), Tilt.Y));
+            3004, 0.1f, FColor::Cyan,
+            FString::Printf(TEXT("[IMU Degrees] P: %.1f | Y: %.1f | R: %.1f"),
+                            DegPitch, DegYaw, DegRoll));
       }
     }
   }
