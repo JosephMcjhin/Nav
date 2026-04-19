@@ -8,22 +8,19 @@ FString UNavigationMathLibrary::GetRelativeDirectionText(
   float AngleDegrees =
       FMath::RadiansToDegrees(FMath::Atan2(RightDot, ForwardDot));
 
-  if (AngleDegrees >= -22.5f && AngleDegrees < 22.5f) {
+  // Dead-zone: within ±15° is "forward", within ±165° flip is "backward"
+  if (AngleDegrees >= -15.0f && AngleDegrees < 15.0f) {
     return UTF8_TO_TCHAR(u8"向前");
-  } else if (AngleDegrees >= 22.5f && AngleDegrees < 67.5f) {
-    return UTF8_TO_TCHAR(u8"向右前方");
-  } else if (AngleDegrees >= 67.5f && AngleDegrees < 112.5f) {
-    return UTF8_TO_TCHAR(u8"向右转");
-  } else if (AngleDegrees >= 112.5f && AngleDegrees < 157.5f) {
-    return UTF8_TO_TCHAR(u8"向右后方");
-  } else if (AngleDegrees >= 157.5f || AngleDegrees < -157.5f) {
+  } else if (AngleDegrees >= 165.0f || AngleDegrees < -165.0f) {
     return UTF8_TO_TCHAR(u8"向后转");
-  } else if (AngleDegrees >= -157.5f && AngleDegrees < -112.5f) {
-    return UTF8_TO_TCHAR(u8"向左后方");
-  } else if (AngleDegrees >= -112.5f && AngleDegrees < -67.5f) {
-    return UTF8_TO_TCHAR(u8"向左转");
+  } else if (AngleDegrees > 0.0f) {
+    int32 Deg = FMath::RoundToInt(AngleDegrees);
+    return FString::Printf(TEXT("%s%d%s"), UTF8_TO_TCHAR(u8"向右转 "), Deg,
+                           UTF8_TO_TCHAR(u8" 度"));
   } else {
-    return UTF8_TO_TCHAR(u8"向左前方");
+    int32 Deg = FMath::RoundToInt(-AngleDegrees);
+    return FString::Printf(TEXT("%s%d%s"), UTF8_TO_TCHAR(u8"向左转 "), Deg,
+                           UTF8_TO_TCHAR(u8" 度"));
   }
 }
 

@@ -1,16 +1,23 @@
+import os
+import json
 import math
 import threading
 import numpy as np
 
 
 class UwbCalibrationManager:
-    """Manages the 3-point UWB to UE coordinate transformation (affine, least-squares)."""
+    """Manages the 3-point UWB to UE coordinate transformation and IMU alignment."""
 
-    def __init__(self):
+    def __init__(self, cache_path="calibration_cache.json"):
         self.lock = threading.Lock()
+        self.cache_path = cache_path
         self.last_uwb_pos = None
         self.calib_points = []
         self.transform_matrix = None   # numpy 2×3 affine matrix
+        self.imu_offset = 0.0          # Offset to align IMU yaw with UE world yaw
+        self.is_heading_calibrated = False
+        
+        self.load_cache()
 
     def update_uwb_pos(self, x: float, y: float):
         """Update the latest raw UWB position tracked."""
@@ -74,6 +81,8 @@ class UwbCalibrationManager:
             max_err = float(residuals.max())
 
             self.transform_matrix = M
+            self.save_cache()  # Persist after solving
+
             matrix_info = {
                 "M": M.tolist(),
                 "max_train_error_ue": max_err
@@ -83,11 +92,66 @@ class UwbCalibrationManager:
                 f"Max training error: {max_err:.1f} UE units."
             )
 
+    def calibrate_heading(self, current_imu_yaw: float, target_ue_yaw: float) -> float:
+        """
+        Calculate and store imu_offset = target_ue_yaw - current_imu_yaw.
+        Returns the new offset.
+        """
+        with self.lock:
+            # Normalize to 0-360
+            offset = (target_ue_yaw - current_imu_yaw) % 360.0
+            self.imu_offset = offset
+            self.is_heading_calibrated = True
+            self.save_cache()
+            return offset
+
+    def apply_imu_offset(self, raw_yaw: float) -> float:
+        """Applies the stored offset to a raw IMU yaw reading."""
+        with self.lock:
+            return (raw_yaw + self.imu_offset) % 360.0
+
+    def save_cache(self):
+        """Save calibration data to a JSON file."""
+        data = {
+            "calib_points": self.calib_points,
+            "imu_offset": self.imu_offset,
+            "is_heading_calibrated": self.is_heading_calibrated,
+            "transform_matrix": self.transform_matrix.tolist() if self.transform_matrix is not None else None
+        }
+        try:
+            with open(self.cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving calibration cache: {e}")
+
+    def load_cache(self):
+        """Load calibration data from JSON file if it exists."""
+        if not os.path.exists(self.cache_path):
+            return
+        try:
+            with open(self.cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.calib_points = data.get("calib_points", [])
+                self.imu_offset = data.get("imu_offset", 0.0)
+                self.is_heading_calibrated = data.get("is_heading_calibrated", False)
+                m_list = data.get("transform_matrix")
+                if m_list:
+                    self.transform_matrix = np.array(m_list)
+        except Exception as e:
+            print(f"Error loading calibration cache: {e}")
+
     def clear(self):
-        """Clears calibration state."""
+        """Clears calibration state and deletes cache."""
         with self.lock:
             self.calib_points.clear()
             self.transform_matrix = None
+            self.imu_offset = 0.0
+            self.is_heading_calibrated = False
+            if os.path.exists(self.cache_path):
+                try:
+                    os.remove(self.cache_path)
+                except OSError:
+                    pass
 
     def transform_uwb_to_ue(self, uwb_x: float, uwb_y: float) -> tuple[float, float] | None:
         """Apply the affine transform matrix to a UWB coordinate to obtain UE coordinate."""

@@ -66,7 +66,9 @@ private:
   bool bIsNavigating = false;
 
   FName LastNavTarget = NAME_None;
-  FString LastSpokenDirection = TEXT("");
+  float LastSpokenAngle = 0.0f; // last spoken direction angle (degrees)
   float LastSpokenDistance = -1.0f;
   float LastTTSTime = 0.0f;
+  static constexpr float MinSpeakAngleDelta =
+      15.0f; // degrees threshold to re-speak direction
 };

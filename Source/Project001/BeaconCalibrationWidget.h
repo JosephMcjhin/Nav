@@ -41,9 +41,6 @@ public:
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnSolve;
 
-  UPROPERTY(meta = (BindWidgetOptional))
-  UButton *BtnReset;
-
   // Toolbar toggling
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnToggleToolbar;
@@ -51,13 +48,15 @@ public:
   UPROPERTY(meta = (BindWidgetOptional))
   class UWidget *ToolbarContainer;
 
-  // Voice Recording
-  UPROPERTY(meta = (BindWidgetOptional))
-  UButton *BtnSpeak;
-
   // Server Connection
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnConnect;
+
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnCalibrateHeading;
+
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnClearCache;
 
   // Status labels
   UPROPERTY(meta = (BindWidgetOptional))
@@ -89,10 +88,6 @@ public:
   /** Send /api/calibrate/solve to the server. */
   UFUNCTION(BlueprintCallable, Category = "Beacon Calibration")
   void SolveCalibration();
-
-  /** Clear calibration data and start over. */
-  UFUNCTION(BlueprintCallable, Category = "Beacon Calibration")
-  void ResetCalibration();
 
   /**
    * Move the owned character in 2D.
@@ -137,17 +132,25 @@ private:
 
   UFUNCTION()
   void OnSolve();
-  UFUNCTION()
-  void OnReset();
 
   UFUNCTION()
   void OnToggleToolbar();
 
   UFUNCTION()
-  void OnSpeakPressed();
+  void OnWSConnected(const FString& URL);
+
   UFUNCTION()
-  void OnSpeakReleased();
+  void OnWSConnectionError(const FString& Error);
+
+  UFUNCTION()
+  void OnServerStatusReceived(bool bIsCalibrated, bool bIsHeadingCalibrated, float ImuOffset, int32 Points);
 
   UFUNCTION()
   void OnConnectClicked();
+
+  UFUNCTION()
+  void OnCalibrateHeadingClicked();
+
+  UFUNCTION()
+  void OnClearCacheClicked();
 };

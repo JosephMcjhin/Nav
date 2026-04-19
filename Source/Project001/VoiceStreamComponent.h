@@ -11,6 +11,9 @@ class IWebSocket;
 class USoundWaveProcedural;
 class UAudioComponent;
 
+UENUM(BlueprintType)
+enum class EVoiceState : uint8 { Idle, Speaking, Processing };
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnVoiceCommandReceived, FString,
                                             CommandResult);
 
@@ -62,6 +65,23 @@ public:
   /** Play back received PCM binary data */
   void HandleIncomingTTSAudio(const void *Data, int32 Size);
 
+  /** If true, the microphone is always capturing and auto-detecting silence to
+   * send packets. */
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice Nav")
+  bool bAlwaysOn = true;
+
+  /** Silence threshold for VAD (absolute amplitude). */
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice Nav")
+  float SilenceThreshold = 0.01f;
+
+  /** Time in seconds before a silence is considered end-of-speech. */
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice Nav")
+  float SilenceDurationTrigger = 1.0f;
+
+  /** Maximum duration of a single speech segment in seconds. */
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voice Nav")
+  float MaxSpeechDuration = 10.0f;
+
 private:
   TSharedPtr<IVoiceCapture> VoiceCapture;
   TArray<uint8> VoiceBuffer;
@@ -80,5 +100,27 @@ private:
   UPROPERTY(Transient)
   UAudioComponent *TTSAudioComp;
 
-  float TTSFinishTime = 0.0f;
+  float LastSpokenDistance = -1.0f;
+  float LastTTSTime = 0.0f;
+
+  // New robust queuing logic
+  double ActiveTTSTimestamp = 0.0; // Timestamp of the currently playing audio
+  double LatestPendingTimestamp = 0.0; // Timestamp of the next up audio
+  TArray<uint8> PendingPCMData;        // Buffer for the next up audio
+  FCriticalSection
+      PendingLock; // Lock to protect PendingPCMData between threads
+
+  bool bTTSInterrupted = false;
+
+  // VAD Internal State
+  EVoiceState CurrentVoiceState = EVoiceState::Idle;
+  TArray<uint8> PreRecordBuffer;
+
+  float CurrentSilenceTime = 0.0f;
+  float CurrentSpeechDuration = 0.0f;
+  bool bIsCapturing = false;
+
+  /** Process incoming chunks against VAD state machine and handle transmission
+   */
+  void ProcessAudioChunk(const uint8 *Data, uint32 Size);
 };

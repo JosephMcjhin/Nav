@@ -12,6 +12,7 @@ import edge_tts
 import numpy as np
 import whisper
 from pydub import AudioSegment
+from pydub.silence import detect_leading_silence
 
 from modules.command_parser import parse_navigation_command
 
@@ -41,7 +42,7 @@ def generate_tts_audio(text: str) -> bytes | None:
     tmp_path = None
     try:
         log.info(f"Generating TTS: [{text}]")
-        communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
+        communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural", rate="+100%")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
             tmp_path = f.name
         asyncio.run(communicate.save(tmp_path))
@@ -52,7 +53,17 @@ def generate_tts_audio(text: str) -> bytes | None:
             .set_frame_rate(16000)
             .set_sample_width(2)
         )
-        return audio.raw_data
+        
+        # Trim leading and trailing silence
+        start_trim = detect_leading_silence(audio)
+        end_trim = detect_leading_silence(audio.reverse())
+        
+        duration = len(audio)
+        trimmed_audio = audio[start_trim:duration-end_trim]
+        
+        log.info(f"TTS Trimmed: {start_trim}ms from start, {end_trim}ms from end. New duration: {len(trimmed_audio)}ms")
+        
+        return trimmed_audio.raw_data
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None

@@ -19,7 +19,13 @@ public:
   UFUNCTION(BlueprintCallable, Category = "UWB")
   void SetUWBTarget(float InX, float InY);
 
+  /** Set character yaw rotation (degrees). */
+  UFUNCTION(BlueprintCallable, Category = "UWB")
+  void SetUWBRotation(float Yaw);
+
 private:
   FVector TargetLocation;
   bool bHasTarget = false;
+  FRotator TargetRotation;
+  bool bHasRotation = false;
 };

@@ -7,7 +7,6 @@
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
 
-
 UUWBTargetComponent::UUWBTargetComponent() {
   PrimaryComponentTick.bCanEverTick = true;
 }
@@ -58,6 +57,11 @@ void UUWBTargetComponent::TickComponent(
   } else {
     bHasTarget = false;
   }
+
+  // Apply rotation if set
+  if (bHasRotation) {
+    OwnerPawn->SetActorRotation(TargetRotation);
+  }
 }
 
 void UUWBTargetComponent::SetUWBTarget(float InX, float InY) {
@@ -73,5 +77,16 @@ void UUWBTargetComponent::SetUWBTarget(float InX, float InY) {
         3001, 1.f, FColor::Yellow,
         FString::Printf(TEXT("[UWB] Moving to target X:%.0f Y:%.0f"), InX,
                         InY));
+  }
+}
+
+void UUWBTargetComponent::SetUWBRotation(float Yaw) {
+  TargetRotation = FRotator(0.0f, Yaw, 0.0f);
+  bHasRotation = true;
+
+  if (GEngine) {
+    GEngine->AddOnScreenDebugMessage(
+        3002, 1.f, FColor::Cyan,
+        FString::Printf(TEXT("[UWB] Set rotation Yaw:%.1f"), Yaw));
   }
 }

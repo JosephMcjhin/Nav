@@ -78,7 +78,7 @@ bool UNavigationComponent::NavigateTo(FName DestinationTag) {
   bIsNavigating = true;
 
   LastNavTarget = NAME_None;
-  LastSpokenDirection = TEXT("");
+  LastSpokenAngle = 0.0f;
   LastSpokenDistance = -1.0f;
   LastTTSTime = GetWorld()->GetTimeSeconds();
 
@@ -159,13 +159,20 @@ void UNavigationComponent::TickComponent(
         FVector DirToFirst = (FirstWaypoint - PlayerLoc).GetSafeNormal();
         float DistToFirst =
             FVector::Dist(PlayerLoc, FirstWaypoint) / 100.0f / DistanceScale;
+
+        // Compute current angle (degrees) relative to player forward
+        float ForwardDot = FVector::DotProduct(PlayerForward, DirToFirst);
+        float RightDot = FVector::DotProduct(PlayerRight, DirToFirst);
+        float CurrentAngle =
+            FMath::RadiansToDegrees(FMath::Atan2(RightDot, ForwardDot));
+
         FString CurrentDirStr =
             UNavigationMathLibrary::GetRelativeDirectionText(
                 PlayerForward, PlayerRight, DirToFirst);
 
         if (ActiveTarget != LastNavTarget) {
           LastNavTarget = ActiveTarget;
-          LastSpokenDirection = CurrentDirStr;
+          LastSpokenAngle = CurrentAngle;
           LastSpokenDistance = DistToFirst;
           LastTTSTime = CurrentTime;
 
@@ -174,16 +181,19 @@ void UNavigationComponent::TickComponent(
                                         DistToFirst, UTF8_TO_TCHAR(u8"米"));
           SendTTSMessage(Owner, Msg);
         } else {
-          bool bDirChanged = (CurrentDirStr != LastSpokenDirection);
+          float AngleDelta = FMath::Abs(
+              FMath::FindDeltaAngleDegrees(LastSpokenAngle, CurrentAngle));
+          bool bDirChanged = (AngleDelta >= MinSpeakAngleDelta);
           bool bDistChanged =
               (FMath::Abs(DistToFirst - LastSpokenDistance) >= 0.5f);
+          bool bTimerFired = (CurrentTime - LastTTSTime >= 5.0f);
 
-          if (CurrentTime - LastTTSTime >= 5.0f) {
+          if (bDirChanged || bDistChanged || bTimerFired) {
             FString Msg =
                 CurrentDirStr +
                 FString::Printf(TEXT("%s%.1f%s"), UTF8_TO_TCHAR(u8"，"),
                                 DistToFirst, UTF8_TO_TCHAR(u8"米"));
-            LastSpokenDirection = CurrentDirStr;
+            LastSpokenAngle = CurrentAngle;
             LastSpokenDistance = DistToFirst;
             LastTTSTime = CurrentTime;
             SendTTSMessage(Owner, Msg);
