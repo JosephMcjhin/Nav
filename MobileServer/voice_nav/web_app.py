@@ -35,7 +35,7 @@ def log_all_requests():
 
 # ── Configuration ───────────────────────────────────────────────────────────────
 ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
-HARDCODE_CALIBRATION_CORNERS = True  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(0, 8)
+HARDCODE_CALIBRATION_CORNERS = False  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(0, 8)
 UWB_FILTER_ALPHA = 0.15  # 低通滤波系数：越小越平滑（0.05~0.3）。设为 1.0 关闭滤波。
 
 # ── Shared state ───────────────────────────────────────────────────────────────
