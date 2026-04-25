@@ -9,7 +9,6 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UWBTargetComponent.h"
-#include "VoiceStreamComponent.h"
 #include "WebSocketsModule.h"
 
 UServerConnectionComponent::UServerConnectionComponent() {
@@ -40,41 +39,7 @@ void UServerConnectionComponent::TickComponent(
   if (!WebSocket.IsValid() || !WebSocket->IsConnected())
     return;
 
-  IMUSendTimer += DeltaTime;
-  if (IMUSendTimer >= 0.05f) { // 20Hz polling
-    IMUSendTimer = 0.0f;
-
-    if (APlayerController *PC = GetWorld()->GetFirstPlayerController()) {
-      FVector Tilt, RotationRate, Gravity, Acceleration;
-      PC->GetInputMotionState(Tilt, RotationRate, Gravity, Acceleration);
-
-      // Convert from Radians ([-PI, PI]) to Degrees ([-180, 180])
-      // Using explicit conversion to ensure consistency across mobile platforms
-      float DegPitch = FMath::RadiansToDegrees(Tilt.X);
-      float DegYaw = FMath::RadiansToDegrees(Tilt.Y);
-      float DegRoll = FMath::RadiansToDegrees(Tilt.Z);
-
-      // Only send IMU data if it changed meaningfully (by at least 1 degree)
-      FVector DegTilt(DegPitch, DegYaw, DegRoll);
-      if (!DegTilt.Equals(LastSentTilt, 1.0f)) {
-        LastSentTilt = DegTilt;
-
-        FString Msg = FString::Printf(
-            TEXT("{\"type\": \"imu\", \"pitch\": %.2f, \"yaw\": %.2f, \"roll\": "
-                 "%.2f}"),
-            DegPitch, DegYaw, DegRoll);
-        SendString(Msg);
-      }
-
-      // Professional HUD Display for Sensor Tuning
-      if (GEngine) {
-        GEngine->AddOnScreenDebugMessage(
-            3004, 0.1f, FColor::Cyan,
-            FString::Printf(TEXT("[IMU Degrees] P: %.1f | Y: %.1f | R: %.1f"),
-                            DegPitch, DegYaw, DegRoll));
-      }
-    }
-  }
+    return;
 }
 
 void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
@@ -298,6 +263,11 @@ void UServerConnectionComponent::HandleJsonCommand(
             NavComp->NavigateTo(FName(*DestString));
           }
         }
+      } else if (MsgType == TEXT("stop_navigation")) {
+        if (UNavigationComponent *NavComp =
+                Owner->FindComponentByClass<UNavigationComponent>()) {
+          NavComp->StopNavigation();
+        }
       }
     }
   }
@@ -316,11 +286,5 @@ void UServerConnectionComponent::HandleBinaryData(const void *Data,
     return;
   }
 
-  // Dispatch TTS binary stream to VoiceStreamComponent for audio playback
-  if (AActor *Owner = GetOwner()) {
-    if (UVoiceStreamComponent *VoiceComp =
-            Owner->FindComponentByClass<UVoiceStreamComponent>()) {
-      VoiceComp->HandleIncomingTTSAudio(Data, static_cast<int32>(Size));
-    }
-  }
+  // Binary data handling removed as TTS PCM is no longer sent from the server.
 }

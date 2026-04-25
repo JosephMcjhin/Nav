@@ -5,15 +5,21 @@
 #include "Kismet/GameplayStatics.h"
 #include "NavigationMathLibrary.h"
 #include "NavigationSystem.h"
-#include "VoiceStreamComponent.h"
+#include "ServerConnectionComponent.h"
 
-static void SendTTSMessage(AActor *OwnerActor, const FString &Message) {
+static void SendNavPromptMessage(AActor *OwnerActor, const FString &Message) {
   if (!OwnerActor || Message.IsEmpty())
     return;
-  if (UVoiceStreamComponent *VoiceComp =
-          OwnerActor->FindComponentByClass<UVoiceStreamComponent>()) {
-    VoiceComp->RequestTTS(Message);
+  if (UServerConnectionComponent *ServerComp =
+          OwnerActor->FindComponentByClass<UServerConnectionComponent>()) {
+    FString JsonStr = FString::Printf(TEXT("{\"type\":\"nav_prompt\",\"text\":\"%s\"}"), *Message);
+    ServerComp->SendString(JsonStr);
   }
+}
+
+// Queue a prompt — only the latest will be sent each second
+static void QueueNavPrompt(FString &PendingPrompt, const FString &Message) {
+  PendingPrompt = Message;
 }
 
 UNavigationComponent::UNavigationComponent() {
@@ -69,7 +75,7 @@ bool UNavigationComponent::NavigateTo(FName DestinationTag) {
     UE_LOG(LogTemp, Warning,
            TEXT("[NavigationComponent] Unknown tag: %s. Available: %s"),
            *DestinationTag.ToString(), *AvailableStr);
-    SendTTSMessage(GetOwner(), UTF8_TO_TCHAR(u8"未知的目的地"));
+    SendNavPromptMessage(GetOwner(), UTF8_TO_TCHAR(u8"未知的目的地"));
     return false;
   }
 
@@ -82,7 +88,11 @@ bool UNavigationComponent::NavigateTo(FName DestinationTag) {
   LastSpokenDistance = -1.0f;
   LastTTSTime = GetWorld()->GetTimeSeconds();
 
-  SendTTSMessage(GetOwner(), UTF8_TO_TCHAR(u8"开始导航"));
+  // Clear any stale prompt from the previous navigation session
+  PendingNavPrompt.Empty();
+  PromptSendTimer = 1.0f; // ready to send immediately
+
+  SendNavPromptMessage(GetOwner(), UTF8_TO_TCHAR(u8"开始导航"));
   OnNavigationStarted.Broadcast(DestinationTag);
   return true;
 }
@@ -110,6 +120,14 @@ void UNavigationComponent::TickComponent(
   AActor *Owner = GetOwner();
   if (!Owner || !bIsNavigating || !CachedNavSys || ActiveTarget == NAME_None)
     return;
+
+  // ── Throttled prompt flush (at most once per second) ────────────────────
+  PromptSendTimer += DeltaTime;
+  if (PromptSendTimer >= 1.0f && !PendingNavPrompt.IsEmpty()) {
+    SendNavPromptMessage(Owner, PendingNavPrompt);
+    PendingNavPrompt.Empty();
+    PromptSendTimer = 0.0f;
+  }
 
   float CurrentTime = GetWorld()->GetTimeSeconds();
   FVector PlayerLoc = Owner->GetActorLocation();
@@ -148,7 +166,7 @@ void UNavigationComponent::TickComponent(
 
       if (TotalDist <= 0.1f) {
         if (LastNavTarget != NAME_None) {
-          SendTTSMessage(Owner, UTF8_TO_TCHAR(u8"已到达目的地"));
+          QueueNavPrompt(PendingNavPrompt, UTF8_TO_TCHAR(u8"已到达目的地"));
           LastNavTarget = NAME_None;
           OnNavigationArrived.Broadcast(ActiveTarget, true);
           bIsNavigating = false;
@@ -179,7 +197,7 @@ void UNavigationComponent::TickComponent(
           FString Msg = CurrentDirStr +
                         FString::Printf(TEXT("%s%.1f%s"), UTF8_TO_TCHAR(u8"，"),
                                         DistToFirst, UTF8_TO_TCHAR(u8"米"));
-          SendTTSMessage(Owner, Msg);
+          QueueNavPrompt(PendingNavPrompt, Msg);
         } else {
           float AngleDelta = FMath::Abs(
               FMath::FindDeltaAngleDegrees(LastSpokenAngle, CurrentAngle));
@@ -196,13 +214,13 @@ void UNavigationComponent::TickComponent(
             LastSpokenAngle = CurrentAngle;
             LastSpokenDistance = DistToFirst;
             LastTTSTime = CurrentTime;
-            SendTTSMessage(Owner, Msg);
+            QueueNavPrompt(PendingNavPrompt, Msg);
           }
         }
       }
     } else if (NavPath && NavPath->PathPoints.Num() < 2) {
       if (LastNavTarget != NAME_None) {
-        SendTTSMessage(Owner, UTF8_TO_TCHAR(u8"已到达目的地"));
+        QueueNavPrompt(PendingNavPrompt, UTF8_TO_TCHAR(u8"已到达目的地"));
         LastNavTarget = NAME_None;
         OnNavigationArrived.Broadcast(ActiveTarget, true);
         bIsNavigating = false;

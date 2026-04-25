@@ -15,7 +15,7 @@ import numpy as np
 from flask import Flask, jsonify, request
 from flask_sock import Sock
 
-from modules.speech_to_nav import generate_tts_audio, process_audio_to_command
+from modules.command_parser import parse_navigation_command
 from modules.location_calibration import UwbCalibrationManager
 
 # ── App setup ──────────────────────────────────────────────────────────────────
@@ -35,7 +35,6 @@ def log_all_requests():
 
 # ── Configuration ───────────────────────────────────────────────────────────────
 ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
-HARDCODE_CALIBRATION_CORNERS = False  # 开关：开启时，校准采点1强制当做 UWB(0,0)，采点2强制 UWB(0, 8)
 UWB_FILTER_ALPHA = 0.15  # 低通滤波系数：越小越平滑（0.05~0.3）。设为 1.0 关闭滤波。
 
 # ── Shared state ───────────────────────────────────────────────────────────────
@@ -54,6 +53,7 @@ def broadcast(payload: dict):
             dead.append(ws)
     for ws in dead:
         active_ws.pop(ws, None)
+
 
 
 # ── REST Endpoints ─────────────────────────────────────────────────────────────
@@ -81,6 +81,14 @@ def set_target():
     broadcast({"type": "set_target", "x": x, "y": y, "z": z})
     if ENABLE_VERBOSE_LOGS:
         log.info(f"set_target → x={x} y={y} z={z} to {len(active_ws)} clients")
+    return jsonify({"status": "ok", "clients": len(active_ws)})
+
+
+@app.route("/api/stop_navigation", methods=["POST"])
+def stop_navigation():
+    """Immediately stop character navigation in UE."""
+    broadcast({"type": "stop_navigation"})
+    log.info(f"stop_navigation → Broadcasted to {len(active_ws)} clients")
     return jsonify({"status": "ok", "clients": len(active_ws)})
 
 
@@ -114,21 +122,7 @@ def calibrate_point():
     ue_y = float(data.get("y", 0))
     point_index = data.get("index", None)
 
-    # ==== [修改] 强行覆盖实际 UWB 测算位置，用于桌面方便测试 ====
-    if HARDCODE_CALIBRATION_CORNERS:
-        if point_index == 0:
-            uwb_calibrator.update_uwb_pos(0.0, 0.0)
-            if ENABLE_VERBOSE_LOGS:
-                log.info("【测试专用】已经将 采点1 的其实际 UWB 基站位置强行修正锁定为 (0.0, 0.0)")
-        elif point_index == 1:
-            uwb_calibrator.update_uwb_pos(8.0, 0.0)
-            if ENABLE_VERBOSE_LOGS:
-                log.info("【测试专用】已经将 采点2 的其实际 UWB 基站位置强行修正锁定为 (8.0, 0.0)")
-        elif point_index == 2:
-            uwb_calibrator.update_uwb_pos(0.0, 8.0)
-            if ENABLE_VERBOSE_LOGS:
-                log.info("【测试专用】已经将 采点3 的其实际 UWB 基站位置强行修正锁定为 (0.0, 8.0)")
-    # ==============================================================
+
 
     valid_count, msg = uwb_calibrator.add_calibration_point(ue_x, ue_y, point_index)
     if "No UWB signal" in msg:
@@ -192,15 +186,13 @@ def calibrate_clear():
 
 # ── WebSocket Handler ──────────────────────────────────────────────────────────
 
-active_ws = {}
+
 
 @sock.route("/ws")
 def ws_handler(ws):
     client_ip = request.remote_addr
     log.info(f"WebSocket client connected from {client_ip}")
     active_ws[ws] = {"ip": client_ip, "connected_at": time.time()}
-    audio_buffer = bytearray()
-
     try:
         # Initial greeting and status sync
         with uwb_calibrator.lock:
@@ -222,10 +214,6 @@ def ws_handler(ws):
             if data is None:
                 break
 
-            if isinstance(data, bytes):
-                audio_buffer.extend(data)
-                continue
-
             try:
                 msg = json.loads(data)
             except Exception:
@@ -239,27 +227,23 @@ def ws_handler(ws):
                 corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
                 broadcast({"type": "set_rotation", "yaw": corrected_yaw})
 
-            elif msg_type == "tts":
-                text = msg.get("text", "").strip()
-                timestamp = float(msg.get("timestamp", 0.0))
-                if text:
-                    threading.Thread(
-                        target=_tts_worker, args=(ws, text, timestamp), daemon=True
-                    ).start()
+            elif msg_type == "nav_request":
+                target_str = msg.get("target", "")
+                cmd = parse_navigation_command(target_str)
+                if cmd:
+                    broadcast({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    ws.send(json.dumps({"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True}))
+                else:
+                    ws.send(json.dumps({"type": "status", "text": "无法识别目标", "success": False}))
 
-            elif msg_type == "end_of_speech":
-                if len(audio_buffer) < 8000:
-                    ws.send(json.dumps({"type": "status", "text": "太短，请重试"}))
-                    audio_buffer.clear()
-                    continue
+            elif msg_type == "stop_navigation":
+                broadcast({"type": "stop_navigation"})
+                log.info("Stop navigation command received from client.")
 
-                log.info(f"🎤 [VOICE] 接收到一段语音数据，时长：{len(audio_buffer) / 32000.0:.2f} 秒。开始进入识别流程...")
-                ws.send(json.dumps({"type": "status", "text": "识别中..."}))
-                pcm = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
-                audio_buffer.clear()
-                threading.Thread(
-                    target=_voice_worker, args=(ws, pcm), daemon=True
-                ).start()
+            elif msg_type == "nav_prompt":
+                text = msg.get("text", "")
+                broadcast({"type": "nav_prompt", "text": text})
+
 
     except Exception as e:
         log.info(f"WS disconnect: {e}")
@@ -267,39 +251,7 @@ def ws_handler(ws):
         active_ws.pop(ws, None)
 
 
-import struct
 
-def _tts_worker(ws, text: str, timestamp: float = 0.0):
-    """Generate TTS audio and stream PCM back over WebSocket with an 8-byte timestamp header."""
-    pcm_bytes = generate_tts_audio(text)
-    if pcm_bytes:
-        try:
-            # Prefix the binary audio with the 8-byte little-endian double float timestamp
-            header = struct.pack('<d', timestamp)
-            ws.send(header + pcm_bytes)
-        except Exception as e:
-            log.error(f"TTS WS send error: {e}")
-
-
-def _voice_worker(ws, pcm: np.ndarray):
-    """Run Whisper inference and broadcast navigation command."""
-    log.info("🚀 [VOICE] 开始进行本地 Whisper 模型推理...")
-    cmd, transcript = process_audio_to_command(pcm)
-
-    if cmd:
-        broadcast({"type": "navigate_to", "destination": cmd.get("target", "")})
-        status_text = f"识别成功: {transcript}"
-    else:
-        status_text = f"无法识别指令: {transcript}"
-
-    log.info(f"🎤 [VOICE] {status_text}")
-
-    try:
-        ws.send(json.dumps({"type": "status", "text": status_text, "heard": transcript, "success": cmd is not None}))
-        time.sleep(1.0)
-        ws.send(json.dumps({"type": "status", "text": "正在全时收音..."}))
-    except Exception as e:
-        log.error(f"WS send error: {e}")
 
 
 def _udp_uwb_listener(port: int = 9003):
@@ -318,6 +270,15 @@ def _udp_uwb_listener(port: int = 9003):
                 log.info(f"[UDP] 从 {addr} 收到信号: {raw_text}")
             
             payload = json.loads(raw_text)
+            
+            # Handle external IMU data
+            if "euler" in payload:
+                euler = payload.get("euler")
+                if isinstance(euler, list) and len(euler) >= 3:
+                    raw_yaw = float(euler[0])
+                    corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
+                    broadcast({"type": "set_rotation", "yaw": corrected_yaw})
+                continue
             
             if payload.get("name") == "Pos" and payload.get("deviceName", "").startswith("T"):
                 device_data = payload.get("data", {})

@@ -20,9 +20,7 @@ public class Project001 : ModuleRules
 			"AIModule",          // UAIBlueprintHelperLibrary
 			"Json",              // JSON parsing
 			"JsonUtilities",     // FJsonObjectConverter
-			"Voice",             // IVoiceCapture
 			"WebSockets",        // IWebSocket
-			"TextToSpeech",      // TTSQueueComponent
 			"UMG",               // UUserWidget / UButton / UTextBlock
 			"Http",              // FHttpModule (calibration HTTP POST)
 			"Slate",             // FSlateColor

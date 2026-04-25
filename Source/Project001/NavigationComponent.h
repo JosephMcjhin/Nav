@@ -71,4 +71,8 @@ private:
   float LastTTSTime = 0.0f;
   static constexpr float MinSpeakAngleDelta =
       15.0f; // degrees threshold to re-speak direction
+
+  // Prompt throttling: buffer latest message, flush at most once per second
+  FString PendingNavPrompt;
+  float PromptSendTimer = 1.0f; // start ready so first message sends immediately
 };

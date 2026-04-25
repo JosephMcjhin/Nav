@@ -14,7 +14,6 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "VoiceStreamComponent.h"
 
 void UBeaconCalibrationWidget::NativeConstruct() {
   Super::NativeConstruct();
