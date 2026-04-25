@@ -38,8 +38,6 @@ void UServerConnectionComponent::TickComponent(
 
   if (!WebSocket.IsValid() || !WebSocket->IsConnected())
     return;
-
-    return;
 }
 
 void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
