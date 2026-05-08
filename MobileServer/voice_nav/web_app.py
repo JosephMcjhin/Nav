@@ -101,16 +101,17 @@ def calibrate_heading():
     Expected JSON: { "imu_yaw": float, "target_ue_yaw": float }
     """
     data = request.get_json(force=True)
-    imu_yaw = float(data.get("imu_yaw", 0))
-    # If target_ue_yaw is not provided, we assume the user is looking towards UE 0 (Forward X)
+    # We explicitly ignore the imu_yaw passed from UE to avoid axis mismatches (e.g. Tilt.Y vs Yaw)
+    # The calibrator will use its internal 'last_imu_yaw' updated via WebSocket/UDP.
     target_ue_yaw = float(data.get("target_ue_yaw", 0))
     
-    offset = uwb_calibrator.calibrate_heading(imu_yaw, target_ue_yaw)
-    log.info(f"Heading aligned: IMU={imu_yaw:.1f} → UE={target_ue_yaw:.1f} (Offset: {offset:.1f})")
+    offset, msg = uwb_calibrator.calibrate_heading(None, target_ue_yaw)
     
-    # Broadcast current status to let clients know they are now calibrated
+    if offset is None:
+        return jsonify({"status": "error", "message": msg}), 400
+
+    log.info(msg)
     broadcast_status()
-    
     return jsonify({"status": "ok", "imu_offset": offset})
 
 
@@ -223,7 +224,9 @@ def ws_handler(ws):
 
             if msg_type == "imu":
                 raw_yaw = float(msg.get("yaw", 0.0))
-                # Centralized IMU offset calculation
+                # Update the latest raw IMU yaw for heading calibration
+                uwb_calibrator.update_imu_yaw(raw_yaw)
+                # Apply current offset and broadcast to UE
                 corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
                 broadcast({"type": "set_rotation", "yaw": corrected_yaw})
 
@@ -276,6 +279,9 @@ def _udp_uwb_listener(port: int = 9003):
                 euler = payload.get("euler")
                 if isinstance(euler, list) and len(euler) >= 3:
                     raw_yaw = float(euler[0])
+                    # Update the latest raw IMU yaw for heading calibration
+                    uwb_calibrator.update_imu_yaw(raw_yaw)
+                    # Apply current offset and broadcast to UE
                     corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
                     broadcast({"type": "set_rotation", "yaw": corrected_yaw})
                 continue

@@ -12,6 +12,7 @@ class UwbCalibrationManager:
         self.lock = threading.Lock()
         self.cache_path = cache_path
         self.last_uwb_pos = None
+        self.last_imu_yaw = None       # Latest raw IMU yaw received via WS or UDP
         self.calib_points = []
         self.transform_matrix = None   # numpy 2×3 affine matrix
         self.imu_offset = 0.0          # Offset to align IMU yaw with UE world yaw
@@ -23,6 +24,11 @@ class UwbCalibrationManager:
         """Update the latest raw UWB position tracked."""
         with self.lock:
             self.last_uwb_pos = (x, y)
+
+    def update_imu_yaw(self, yaw: float):
+        """Update the latest raw IMU yaw tracked."""
+        with self.lock:
+            self.last_imu_yaw = yaw
 
     def add_calibration_point(self, ue_x: float, ue_y: float, point_index=None) -> tuple[int, str]:
         """
@@ -92,18 +98,24 @@ class UwbCalibrationManager:
                 f"Max training error: {max_err:.1f} UE units."
             )
 
-    def calibrate_heading(self, current_imu_yaw: float, target_ue_yaw: float) -> float:
+    def calibrate_heading(self, current_imu_yaw: float | None, target_ue_yaw: float) -> tuple[float | None, str]:
         """
         Calculate and store imu_offset = target_ue_yaw - current_imu_yaw.
-        Returns the new offset.
+        If current_imu_yaw is None, uses self.last_imu_yaw.
+        Returns (new_offset, message).
         """
         with self.lock:
+            imu_to_use = current_imu_yaw if current_imu_yaw is not None else self.last_imu_yaw
+            
+            if imu_to_use is None:
+                return None, "No IMU signal received yet. Please move or wait for data."
+
             # Normalize to 0-360
-            offset = (target_ue_yaw - current_imu_yaw) % 360.0
+            offset = (target_ue_yaw - imu_to_use) % 360.0
             self.imu_offset = offset
             self.is_heading_calibrated = True
             self.save_cache()
-            return offset
+            return offset, f"Heading aligned: IMU={imu_to_use:.1f} → UE={target_ue_yaw:.1f} (Offset: {offset:.1f})"
 
     def apply_imu_offset(self, raw_yaw: float) -> float:
         """Applies the stored offset to a raw IMU yaw reading."""
