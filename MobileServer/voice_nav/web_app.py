@@ -10,10 +10,15 @@ import json
 import logging
 import threading
 import time
+import asyncio
+import base64
+import io
 
 import numpy as np
 from flask import Flask, jsonify, request
 from flask_sock import Sock
+from pydub import AudioSegment
+import edge_tts
 
 from modules.command_parser import parse_navigation_command
 from modules.location_calibration import UwbCalibrationManager
@@ -53,6 +58,26 @@ def broadcast(payload: dict):
             dead.append(ws)
     for ws in dead:
         active_ws.pop(ws, None)
+
+async def _generate_tts_pcm(text: str) -> bytes:
+    """Convert text to 24000Hz 16-bit Mono PCM using edge-tts."""
+    try:
+        communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
+        audio_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data += chunk["data"]
+        
+        if not audio_data:
+            return b""
+
+        # Convert MP3 (from edge-tts) to PCM 24000Hz Mono
+        audio = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+        audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+        return audio.raw_data
+    except Exception as e:
+        log.error(f"TTS Generation Error: {e}")
+        return b""
 
 
 
@@ -245,7 +270,24 @@ def ws_handler(ws):
 
             elif msg_type == "nav_prompt":
                 text = msg.get("text", "")
-                broadcast({"type": "nav_prompt", "text": text})
+                # Create a millisecond timestamp to help the client identify the latest prompt
+                timestamp = int(time.time() * 1000)
+                
+                # Generate TTS audio on server side
+                pcm_data = asyncio.run(_generate_tts_pcm(text))
+                
+                if pcm_data:
+                    audio_b64 = base64.b64encode(pcm_data).decode('utf-8')
+                    broadcast({
+                        "type": "nav_audio", 
+                        "text": text, 
+                        "audio": audio_b64,
+                        "timestamp": timestamp
+                    })
+                    log.info(f"Broadcasted TTS audio for: {text} (timestamp: {timestamp})")
+                else:
+                    # Fallback to text only if TTS fails
+                    broadcast({"type": "nav_prompt", "text": text})
 
 
     except Exception as e:
