@@ -45,7 +45,7 @@ UWB_FILTER_ALPHA = 0.15  # 低通滤波系数：越小越平滑（0.05~0.3）。
 # ── Shared state ───────────────────────────────────────────────────────────────
 active_ws: dict = {}      # ws -> { 'ip': str, 'connected_at': float }
 uwb_calibrator = UwbCalibrationManager()
-_smoothed_ue_pos = None   # low-pass filtered UE position (x, y)
+nav_request_client_ws = None
 
 def broadcast(payload: dict):
     """Send JSON to all connected WebSocket clients."""
@@ -58,6 +58,34 @@ def broadcast(payload: dict):
             dead.append(ws)
     for ws in dead:
         active_ws.pop(ws, None)
+
+
+def send_json(ws, payload: dict) -> bool:
+    """Send JSON to a specific WebSocket client."""
+    if ws is None:
+        return False
+    try:
+        ws.send(json.dumps(payload, ensure_ascii=False))
+        return True
+    except Exception:
+        active_ws.pop(ws, None)
+        return False
+
+
+def _generate_and_send_tts(target_ws, text: str, timestamp: int):
+    """Generate TTS off-thread and send it only to the requesting client."""
+    pcm_data = asyncio.run(_generate_tts_pcm(text))
+    if pcm_data:
+        audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
+        send_json(target_ws, {
+            "type": "nav_audio",
+            "text": text,
+            "audio": audio_b64,
+            "timestamp": timestamp,
+        })
+        log.info(f"Sent TTS audio to nav requester (timestamp: {timestamp})")
+    else:
+        send_json(target_ws, {"type": "nav_prompt", "text": text})
 
 async def _generate_tts_pcm(text: str) -> bytes:
     """Convert text to 24000Hz 16-bit Mono PCM using edge-tts."""
@@ -183,7 +211,8 @@ def calibrate_status():
         "status": "ok", 
         "points": valid_count, 
         "is_calibrated": is_pos_cal,
-        "imu_offset": imu_offset
+        "imu_offset": imu_offset,
+        "is_imu_calibrated": uwb_calibrator.is_imu_calibrated
     })
 
 def broadcast_status():
@@ -195,7 +224,7 @@ def broadcast_status():
     broadcast({
         "type": "status_update",
         "is_calibrated": is_pos_cal,
-        "is_heading_calibrated": uwb_calibrator.is_heading_calibrated,
+        "is_imu_calibrated": uwb_calibrator.is_imu_calibrated,
         "imu_offset": imu_offset,
         "points": valid_count
     })
@@ -216,6 +245,7 @@ def calibrate_clear():
 
 @sock.route("/ws")
 def ws_handler(ws):
+    global nav_request_client_ws
     client_ip = request.remote_addr
     log.info(f"WebSocket client connected from {client_ip}")
     active_ws[ws] = {"ip": client_ip, "connected_at": time.time()}
@@ -230,7 +260,7 @@ def ws_handler(ws):
             "type": "status", 
             "text": "已连接", 
             "is_calibrated": is_pos_cal,
-            "is_heading_calibrated": uwb_calibrator.is_heading_calibrated,
+            "is_imu_calibrated": uwb_calibrator.is_imu_calibrated,
             "imu_offset": imu_offset,
             "points": valid_pts
         }, ensure_ascii=False))
@@ -251,6 +281,9 @@ def ws_handler(ws):
                 raw_yaw = float(msg.get("yaw", 0.0))
                 # Update the latest raw IMU yaw for heading calibration
                 uwb_calibrator.update_imu_yaw(raw_yaw)
+                if (not uwb_calibrator.is_imu_calibrated or
+                        uwb_calibrator.transform_matrix is None):
+                    continue
                 # Apply current offset and broadcast to UE
                 corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
                 broadcast({"type": "set_rotation", "yaw": corrected_yaw})
@@ -259,6 +292,7 @@ def ws_handler(ws):
                 target_str = msg.get("target", "")
                 cmd = parse_navigation_command(target_str)
                 if cmd:
+                    nav_request_client_ws = ws
                     broadcast({"type": "navigate_to", "destination": cmd.get("target", "")})
                     ws.send(json.dumps({"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True}))
                 else:
@@ -272,27 +306,22 @@ def ws_handler(ws):
                 text = msg.get("text", "")
                 # Create a millisecond timestamp to help the client identify the latest prompt
                 timestamp = int(time.time() * 1000)
-                
-                # Generate TTS audio on server side
-                pcm_data = asyncio.run(_generate_tts_pcm(text))
-                
-                if pcm_data:
-                    audio_b64 = base64.b64encode(pcm_data).decode('utf-8')
-                    broadcast({
-                        "type": "nav_audio", 
-                        "text": text, 
-                        "audio": audio_b64,
-                        "timestamp": timestamp
-                    })
-                    log.info(f"Broadcasted TTS audio for: {text} (timestamp: {timestamp})")
+                target_ws = nav_request_client_ws
+                if target_ws in active_ws:
+                    threading.Thread(
+                        target=_generate_and_send_tts,
+                        args=(target_ws, text, timestamp),
+                        daemon=True,
+                    ).start()
                 else:
-                    # Fallback to text only if TTS fails
-                    broadcast({"type": "nav_prompt", "text": text})
+                    log.warning("No active nav requester to receive TTS audio.")
 
 
     except Exception as e:
         log.info(f"WS disconnect: {e}")
     finally:
+        if nav_request_client_ws is ws:
+            nav_request_client_ws = None
         active_ws.pop(ws, None)
 
 
@@ -323,6 +352,9 @@ def _udp_uwb_listener(port: int = 9003):
                     raw_yaw = float(euler[0])
                     # Update the latest raw IMU yaw for heading calibration
                     uwb_calibrator.update_imu_yaw(raw_yaw)
+                    if (not uwb_calibrator.is_imu_calibrated or
+                            uwb_calibrator.transform_matrix is None):
+                        continue
                     # Apply current offset and broadcast to UE
                     corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
                     broadcast({"type": "set_rotation", "yaw": corrected_yaw})
@@ -336,20 +368,14 @@ def _udp_uwb_listener(port: int = 9003):
                     current_x, current_y = float(pos_array[0]), float(pos_array[1])
                     
                     uwb_calibrator.update_uwb_pos(current_x, current_y)
-                    
+                    if (uwb_calibrator.transform_matrix is None or
+                            not uwb_calibrator.is_imu_calibrated):
+                        continue
+
                     # Apply transform if we have an active calibration matrix
                     transformed = uwb_calibrator.transform_uwb_to_ue(current_x, current_y)
                     if transformed:
-                        global _smoothed_ue_pos
-                        raw_x, raw_y = transformed
-                        if _smoothed_ue_pos is None:
-                            _smoothed_ue_pos = (raw_x, raw_y)
-                        else:
-                            # Exponential moving average (low-pass filter)
-                            sx = _smoothed_ue_pos[0] + UWB_FILTER_ALPHA * (raw_x - _smoothed_ue_pos[0])
-                            sy = _smoothed_ue_pos[1] + UWB_FILTER_ALPHA * (raw_y - _smoothed_ue_pos[1])
-                            _smoothed_ue_pos = (sx, sy)
-                        ue_x, ue_y = _smoothed_ue_pos
+                        ue_x, ue_y = transformed
                         broadcast({"type": "set_target", "x": ue_x, "y": ue_y, "z": 0, "calibrated": True})
         except Exception as e:
             pass

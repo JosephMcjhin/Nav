@@ -40,6 +40,25 @@ void UServerConnectionComponent::TickComponent(
     return;
 }
 
+void UServerConnectionComponent::CleanupWebSocket(bool bCloseSocket) {
+  if (!WebSocket.IsValid()) {
+    return;
+  }
+
+  TSharedPtr<IWebSocket> LocalSocket = WebSocket;
+  WebSocket.Reset();
+
+  LocalSocket->OnConnected().Clear();
+  LocalSocket->OnConnectionError().Clear();
+  LocalSocket->OnRawMessage().Clear();
+  LocalSocket->OnMessage().Clear();
+  LocalSocket->OnClosed().Clear();
+
+  if (bCloseSocket) {
+    LocalSocket->Close();
+  }
+}
+
 void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
   ServerBaseURL = InServerURL.Replace(TEXT("ws://"), TEXT("http://"))
                       .Replace(TEXT("/ws"), TEXT(""));
@@ -51,50 +70,77 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
 
   // Close any existing (dead) connection before creating a new one
   if (WebSocket.IsValid()) {
-    WebSocket->Close();
-    WebSocket.Reset();
+    bIsDisconnecting = true;
+    CleanupWebSocket(true);
   }
 
   WebSocket = FWebSocketsModule::Get().CreateWebSocket(InServerURL);
+  bIsDisconnecting = false;
+  TWeakObjectPtr<UServerConnectionComponent> WeakThis(this);
 
-  WebSocket->OnConnected().AddLambda([this, InServerURL]() {
+  WebSocket->OnConnected().AddLambda([WeakThis, InServerURL]() {
+    if (!WeakThis.IsValid()) {
+      return;
+    }
+    UServerConnectionComponent *Self = WeakThis.Get();
     UE_LOG(LogTemp, Log, TEXT("[ServerConnection] WebSocket Connected to %s"),
            *InServerURL);
-    ConnectedURL = InServerURL;
+    Self->bIsDisconnecting = false;
+    Self->ConnectedURL = InServerURL;
     if (GEngine)
       GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Green,
                                        TEXT("Connected to Python Server."));
-    OnConnectionSuccess.Broadcast(InServerURL);
+    Self->OnConnectionSuccess.Broadcast(InServerURL);
   });
 
-  WebSocket->OnConnectionError().AddLambda([this](const FString &Error) {
+  WebSocket->OnConnectionError().AddLambda([WeakThis](const FString &Error) {
+    if (!WeakThis.IsValid()) {
+      return;
+    }
+    UServerConnectionComponent *Self = WeakThis.Get();
+    if (Self->bIsDisconnecting) {
+      return;
+    }
     UE_LOG(LogTemp, Error, TEXT("[ServerConnection] WS Error: %s"), *Error);
     if (GEngine)
       GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red,
                                        TEXT("WS Error: ") + Error);
-    OnConnectionFailed.Broadcast(Error);
+    Self->OnConnectionFailed.Broadcast(Error);
   });
 
   WebSocket->OnRawMessage().AddLambda(
-      [this](const void *Data, SIZE_T Size, SIZE_T BytesRemaining) {
-        HandleBinaryData(Data, Size);
+      [WeakThis](const void *Data, SIZE_T Size, SIZE_T BytesRemaining) {
+        if (!WeakThis.IsValid()) {
+          return;
+        }
+        WeakThis->HandleBinaryData(Data, Size);
       });
 
-  WebSocket->OnMessage().AddLambda([this](const FString &MessageString) {
-    HandleJsonCommand(MessageString);
+  WebSocket->OnMessage().AddLambda([WeakThis](const FString &MessageString) {
+    if (!WeakThis.IsValid()) {
+      return;
+    }
+    WeakThis->HandleJsonCommand(MessageString);
   });
 
   WebSocket->OnClosed().AddLambda(
-      [this](int32 StatusCode, const FString &Reason, bool bWasClean) {
+      [WeakThis](int32 StatusCode, const FString &Reason, bool bWasClean) {
+        if (!WeakThis.IsValid()) {
+          return;
+        }
+        UServerConnectionComponent *Self = WeakThis.Get();
         UE_LOG(LogTemp, Warning,
                TEXT("[ServerConnection] WS Closed: Code=%d Reason=%s Clean=%d"),
                StatusCode, *Reason, bWasClean);
-        ConnectedURL.Empty();
+        Self->ConnectedURL.Empty();
+        if (Self->bIsDisconnecting) {
+          return;
+        }
         if (GEngine)
           GEngine->AddOnScreenDebugMessage(
               -1, 5.f, FColor::Red,
               FString::Printf(TEXT("WS Disconnected (Code: %d)"), StatusCode));
-        OnConnectionFailed.Broadcast(
+        Self->OnConnectionFailed.Broadcast(
             FString::Printf(TEXT("Connection closed: %d"), StatusCode));
       });
 
@@ -102,14 +148,13 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
 }
 
 void UServerConnectionComponent::Disconnect() {
-  if (WebSocket.IsValid() && WebSocket->IsConnected()) {
-    WebSocket->Close();
-  }
+  bIsDisconnecting = true;
+  CleanupWebSocket(true);
   ConnectedURL.Empty();
 
   // Wipe cached server states to prevent ghost-calibration on reconnect
   bLastIsCalibrated = false;
-  bLastIsHeadingCalibrated = false;
+  bLastIsImuCalibrated = false;
   LastImuOffset = 0.0;
   LastPoints = 0;
 }
@@ -217,21 +262,21 @@ void UServerConnectionComponent::HandleJsonCommand(
         // Update cached server status for UI logic (only apply fields that
         // exist in payload)
         JsonObject->TryGetBoolField(TEXT("is_calibrated"), bLastIsCalibrated);
-        JsonObject->TryGetBoolField(TEXT("is_heading_calibrated"),
-                                    bLastIsHeadingCalibrated);
+        JsonObject->TryGetBoolField(TEXT("is_imu_calibrated"),
+                                    bLastIsImuCalibrated);
         JsonObject->TryGetNumberField(TEXT("imu_offset"), LastImuOffset);
         JsonObject->TryGetNumberField(TEXT("points"), LastPoints);
 
-        OnServerStatus.Broadcast(bLastIsCalibrated, bLastIsHeadingCalibrated,
+        OnServerStatus.Broadcast(bLastIsCalibrated, bLastIsImuCalibrated,
                                  static_cast<float>(LastImuOffset), LastPoints);
 
         // Display calibration cache info on screen (Top-left debug text)
         if (GEngine) {
           FString StatusStr = FString::Printf(
-              TEXT("POS:%s HEADING:%s"),
+              TEXT("POS:%s IMU:%s"),
               bLastIsCalibrated ? TEXT("OK") : TEXT("WAIT"),
-              bLastIsHeadingCalibrated ? TEXT("OK") : TEXT("WAIT"));
-          FColor DisplayColor = (bLastIsCalibrated && bLastIsHeadingCalibrated)
+              bLastIsImuCalibrated ? TEXT("OK") : TEXT("WAIT"));
+          FColor DisplayColor = (bLastIsCalibrated && bLastIsImuCalibrated)
                                     ? FColor::Green
                                     : FColor::Orange;
           GEngine->AddOnScreenDebugMessage(

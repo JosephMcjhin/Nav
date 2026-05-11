@@ -8,7 +8,7 @@ class IWebSocket;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnConnectionSuccess, const FString&, URL);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnConnectionFailed, const FString&, Error);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnServerStatus, bool, bIsCalibrated, bool, bIsHeadingCalibrated, float, ImuOffset, int32, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnServerStatus, bool, bIsCalibrated, bool, bIsImuCalibrated, float, ImuOffset, int32, Points);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PROJECT001_API UServerConnectionComponent : public UActorComponent {
@@ -76,13 +76,15 @@ private:
   FString ConnectedURL;
   float IMUSendTimer = 0.0f;
   FVector LastSentTilt = FVector(-1.f, -1.f, -1.f);
+  bool bIsDisconnecting = false;
   
   // Cached server status
   bool bLastIsCalibrated = false;
-  bool bLastIsHeadingCalibrated = false;
+  bool bLastIsImuCalibrated = false;
   double LastImuOffset = 0.0;
   int32 LastPoints = 0;
 
+  void CleanupWebSocket(bool bCloseSocket);
   void HandleJsonCommand(const FString &MessageString);
   void HandleBinaryData(const void *Data, SIZE_T Size);
 };

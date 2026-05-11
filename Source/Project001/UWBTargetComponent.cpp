@@ -43,24 +43,27 @@ void UUWBTargetComponent::TickComponent(
     }
   }
 
-  if (!bHasTarget)
-    return;
+  if (bHasTarget) {
+    FVector CurrentLoc = OwnerPawn->GetActorLocation();
+    FVector Direction =
+        FVector(TargetLocation.X, TargetLocation.Y, CurrentLoc.Z) - CurrentLoc;
+    Direction.Z = 0.0f; // Ignore Z axis
 
-  FVector CurrentLoc = OwnerPawn->GetActorLocation();
-  FVector Direction =
-      FVector(TargetLocation.X, TargetLocation.Y, CurrentLoc.Z) - CurrentLoc;
-  Direction.Z = 0.0f; // Ignore Z axis
-
-  if (Direction.Size2D() > 10.0f) {
-    Direction.Normalize();
-    OwnerPawn->AddMovementInput(Direction, 1.0f);
-  } else {
-    bHasTarget = false;
+    if (Direction.Size2D() > 10.0f) {
+      Direction.Normalize();
+      OwnerPawn->AddMovementInput(Direction, 1.0f);
+    } else {
+      bHasTarget = false;
+    }
   }
 
   // Apply rotation if set
   if (bHasRotation) {
-    OwnerPawn->SetActorRotation(TargetRotation);
+    FRotator CurrentRotation = OwnerPawn->GetActorRotation();
+    CurrentRotation.Yaw = FMath::FixedTurn(
+        CurrentRotation.Yaw, TargetRotation.Yaw,
+        RotationInterpSpeedDegPerSec * DeltaTime);
+    OwnerPawn->SetActorRotation(CurrentRotation);
   }
 }
 

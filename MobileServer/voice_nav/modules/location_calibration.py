@@ -10,13 +10,18 @@ class UwbCalibrationManager:
 
     def __init__(self, cache_path="calibration_cache.json"):
         self.lock = threading.Lock()
-        self.cache_path = cache_path
+        if os.path.isabs(cache_path):
+            self.cache_path = cache_path
+        else:
+            self.cache_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", cache_path)
+            )
         self.last_uwb_pos = None
         self.last_imu_yaw = None       # Latest raw IMU yaw received via WS or UDP
         self.calib_points = []
         self.transform_matrix = None   # numpy 2×3 affine matrix
         self.imu_offset = 0.0          # Offset to align IMU yaw with UE world yaw
-        self.is_heading_calibrated = False
+        self.is_imu_calibrated = False
         
         self.load_cache()
 
@@ -40,6 +45,8 @@ class UwbCalibrationManager:
                 return 0, "No UWB signal received yet. Please wait for UWB data."
 
             pair = {"ue": (ue_x, ue_y), "uwb": self.last_uwb_pos}
+            # New point captures invalidate the previously solved position transform.
+            self.transform_matrix = None
 
             if point_index is not None:
                 idx = int(point_index)
@@ -53,6 +60,8 @@ class UwbCalibrationManager:
                     self.calib_points.clear()
                 self.calib_points.append(pair)
                 msg = f"Calib sample [{len(self.calib_points)}]: UE({ue_x:.1f}, {ue_y:.1f}) ↔ UWB{self.last_uwb_pos}"
+
+            self.save_cache()
 
         valid_count = sum(1 for p in self.calib_points if p is not None)
         return valid_count, msg
@@ -100,8 +109,7 @@ class UwbCalibrationManager:
 
     def calibrate_heading(self, current_imu_yaw: float | None, target_ue_yaw: float) -> tuple[float | None, str]:
         """
-        Calculate and store imu_offset for the relation:
-        ue_yaw = imu_offset - imu_yaw.
+        Calculate and store imu_offset = target_ue_yaw - current_imu_yaw.
         If current_imu_yaw is None, uses self.last_imu_yaw.
         Returns (new_offset, message).
         """
@@ -112,23 +120,23 @@ class UwbCalibrationManager:
                 return None, "No IMU signal received yet. Please move or wait for data."
 
             # Normalize to 0-360
-            offset = (target_ue_yaw + imu_to_use) % 360.0
+            offset = (target_ue_yaw - imu_to_use) % 360.0
             self.imu_offset = offset
-            self.is_heading_calibrated = True
+            self.is_imu_calibrated = True
             self.save_cache()
             return offset, f"Heading aligned: IMU={imu_to_use:.1f} → UE={target_ue_yaw:.1f} (Offset: {offset:.1f})"
 
     def apply_imu_offset(self, raw_yaw: float) -> float:
-        """Map IMU yaw to UE yaw using the opposite rotation direction."""
+        """Applies the stored offset to a raw IMU yaw reading."""
         with self.lock:
-            return (self.imu_offset - raw_yaw) % 360.0
+            return (raw_yaw + self.imu_offset) % 360.0
 
     def save_cache(self):
         """Save calibration data to a JSON file."""
         data = {
             "calib_points": self.calib_points,
             "imu_offset": self.imu_offset,
-            "is_heading_calibrated": self.is_heading_calibrated,
+            "is_imu_calibrated": self.is_imu_calibrated,
             "transform_matrix": self.transform_matrix.tolist() if self.transform_matrix is not None else None
         }
         try:
@@ -146,7 +154,7 @@ class UwbCalibrationManager:
                 data = json.load(f)
                 self.calib_points = data.get("calib_points", [])
                 self.imu_offset = data.get("imu_offset", 0.0)
-                self.is_heading_calibrated = data.get("is_heading_calibrated", False)
+                self.is_imu_calibrated = data.get("is_imu_calibrated", False)
                 m_list = data.get("transform_matrix")
                 if m_list:
                     self.transform_matrix = np.array(m_list)
@@ -159,7 +167,9 @@ class UwbCalibrationManager:
             self.calib_points.clear()
             self.transform_matrix = None
             self.imu_offset = 0.0
-            self.is_heading_calibrated = False
+            self.is_imu_calibrated = False
+            self.last_uwb_pos = None
+            self.last_imu_yaw = None
             if os.path.exists(self.cache_path):
                 try:
                     os.remove(self.cache_path)

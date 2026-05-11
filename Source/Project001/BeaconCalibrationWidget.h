@@ -143,7 +143,7 @@ private:
   void OnWSConnectionError(const FString& Error);
 
   UFUNCTION()
-  void OnServerStatusReceived(bool bIsCalibrated, bool bIsHeadingCalibrated, float ImuOffset, int32 Points);
+  void OnServerStatusReceived(bool bIsCalibrated, bool bIsImuCalibrated, float ImuOffset, int32 Points);
 
   UFUNCTION()
   void OnConnectClicked();

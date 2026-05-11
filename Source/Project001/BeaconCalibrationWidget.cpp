@@ -110,12 +110,34 @@ void UBeaconCalibrationWidget::CapturePoint(int32 PointIndex) {
       TJsonWriterFactory<>::Create(&OutputString);
   FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
 
-  HttpPost(TEXT("/api/calibrate/point"), OutputString, nullptr);
+  HttpPost(TEXT("/api/calibrate/point"), OutputString,
+           [this, PointIndex](const FString &ResponseBody) {
+             TSharedPtr<FJsonObject> ResponseJson;
+             TSharedRef<TJsonReader<>> Reader =
+                 TJsonReaderFactory<>::Create(ResponseBody);
 
-  // Mark the point as captured in the bitmask
-  CapturedFlags |= (1 << (PointIndex - 1));
-  SetStatus(FString::Printf(TEXT("Point %d Captured"), PointIndex));
-  RefreshUI();
+             const bool bParsed =
+                 FJsonSerializer::Deserialize(Reader, ResponseJson) &&
+                 ResponseJson.IsValid();
+             FString StatusValue;
+             const bool bOk = bParsed &&
+                              ResponseJson->TryGetStringField(TEXT("status"),
+                                                              StatusValue) &&
+                              StatusValue == TEXT("ok");
+
+             if (!bOk) {
+               FString ErrorMessage = TEXT("Failed to capture point.");
+               if (bParsed) {
+                 ResponseJson->TryGetStringField(TEXT("message"), ErrorMessage);
+               }
+               SetStatus(ErrorMessage);
+               return;
+             }
+
+             CapturedFlags |= (1 << (PointIndex - 1));
+             SetStatus(FString::Printf(TEXT("Point %d Captured"), PointIndex));
+             RefreshUI();
+           });
 }
 
 void UBeaconCalibrationWidget::SolveCalibration() {
@@ -127,8 +149,31 @@ void UBeaconCalibrationWidget::SolveCalibration() {
   SetStatus(TEXT("Calculating beacon positions..."));
   HttpPost(TEXT("/api/calibrate/solve"), TEXT("{}"),
            [this](const FString &ResponseBody) {
-             // Calibration successful, switch to Speak state
-             SwitchUIState(2);
+             TSharedPtr<FJsonObject> ResponseJson;
+             TSharedRef<TJsonReader<>> Reader =
+                 TJsonReaderFactory<>::Create(ResponseBody);
+
+             const bool bParsed =
+                 FJsonSerializer::Deserialize(Reader, ResponseJson) &&
+                 ResponseJson.IsValid();
+             FString StatusValue;
+             const bool bOk = bParsed &&
+                              ResponseJson->TryGetStringField(TEXT("status"),
+                                                              StatusValue) &&
+                              StatusValue == TEXT("ok");
+
+             if (!bOk) {
+               FString ErrorMessage = TEXT("Calibration solve failed.");
+               if (bParsed) {
+                 ResponseJson->TryGetStringField(TEXT("message"), ErrorMessage);
+               }
+               SetStatus(ErrorMessage);
+               SwitchUIState(1);
+               return;
+             }
+
+             SetStatus(TEXT("Position calibration solved. IMU calibration still required."));
+             SwitchUIState(1);
            });
 }
 
@@ -283,10 +328,10 @@ void UBeaconCalibrationWidget::OnWSConnectionError(const FString &Error) {
   SwitchUIState(0);
 }
 
-void UBeaconCalibrationWidget::OnServerStatusReceived(bool bIsCalibrated, bool bIsHeadingCalibrated,
+void UBeaconCalibrationWidget::OnServerStatusReceived(bool bIsCalibrated, bool bIsImuCalibrated,
                                                       float ImuOffset,
                                                       int32 Points) {
-  if (bIsCalibrated && bIsHeadingCalibrated) {
+  if (bIsCalibrated && bIsImuCalibrated) {
     SetStatus(TEXT("Server calibrated. Voice Nav Ready."));
     SwitchUIState(2);
   } else {

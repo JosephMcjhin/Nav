@@ -28,4 +28,5 @@ private:
   bool bHasTarget = false;
   FRotator TargetRotation;
   bool bHasRotation = false;
+  float RotationInterpSpeedDegPerSec = 360.0f;
 };
