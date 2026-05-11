@@ -100,7 +100,8 @@ class UwbCalibrationManager:
 
     def calibrate_heading(self, current_imu_yaw: float | None, target_ue_yaw: float) -> tuple[float | None, str]:
         """
-        Calculate and store imu_offset = target_ue_yaw - current_imu_yaw.
+        Calculate and store imu_offset for the relation:
+        ue_yaw = imu_offset - imu_yaw.
         If current_imu_yaw is None, uses self.last_imu_yaw.
         Returns (new_offset, message).
         """
@@ -111,16 +112,16 @@ class UwbCalibrationManager:
                 return None, "No IMU signal received yet. Please move or wait for data."
 
             # Normalize to 0-360
-            offset = (target_ue_yaw - imu_to_use) % 360.0
+            offset = (target_ue_yaw + imu_to_use) % 360.0
             self.imu_offset = offset
             self.is_heading_calibrated = True
             self.save_cache()
             return offset, f"Heading aligned: IMU={imu_to_use:.1f} → UE={target_ue_yaw:.1f} (Offset: {offset:.1f})"
 
     def apply_imu_offset(self, raw_yaw: float) -> float:
-        """Applies the stored offset to a raw IMU yaw reading."""
+        """Map IMU yaw to UE yaw using the opposite rotation direction."""
         with self.lock:
-            return (raw_yaw + self.imu_offset) % 360.0
+            return (self.imu_offset - raw_yaw) % 360.0
 
     def save_cache(self):
         """Save calibration data to a JSON file."""
