@@ -87,6 +87,7 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
            *InServerURL);
     Self->bIsDisconnecting = false;
     Self->ConnectedURL = InServerURL;
+    Self->SendString(TEXT("{\"type\":\"register\",\"role\":\"ue\"}"));
     if (GEngine)
       GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Green,
                                        TEXT("Connected to Python Server."));

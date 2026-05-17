@@ -1,27 +1,16 @@
 import json
 import math
 import socket
-import sys
 import threading
 import time
 import urllib.request
 
-# To support WebSocket, make sure to run: uv pip install websocket-client
-try:
-    import websocket
-except ImportError:
-    print("Error: 'websocket-client' is missing.")
-    print("Please run: uv pip install websocket-client")
-    sys.exit(1)
-
 UDP_TARGET_IP = "127.0.0.1"
 UDP_TARGET_PORT = 9003
 STATUS_URL = "http://127.0.0.1:8090/api/calibrate/status"
-WS_URL = "ws://127.0.0.1:8090/ws"
 
 # 0: Point 1, 1: Point 2, 2: Point 3, 3: Moving (post-calibration)
 sim_state = 0
-ws_app = None
 
 
 def poll_status():
@@ -43,63 +32,6 @@ def poll_status():
         except Exception:
             pass
         time.sleep(1.0)
-
-
-def on_ws_message(ws, message):
-    """Handle incoming WebSocket messages from the backend."""
-    try:
-        data = json.loads(message)
-        msg_type = data.get("type")
-        if msg_type == "nav_prompt":
-            print(f"\n[导航提示] {data.get('text')}\n> ", end="", flush=True)
-        elif msg_type == "status":
-            print(f"\n[系统状态] {data.get('text')}\n> ", end="", flush=True)
-    except Exception:
-        pass
-
-
-def on_ws_error(ws, error):
-    pass
-
-
-def on_ws_close(ws, close_status_code, close_msg):
-    print("\n[WebSocket] Disconnected from server.")
-
-
-def on_ws_open(ws):
-    print("\n[WebSocket] Connected to server for Navigation Requests/Prompts.")
-
-
-def start_ws_client():
-    global ws_app
-    ws_app = websocket.WebSocketApp(
-        WS_URL,
-        on_open=on_ws_open,
-        on_message=on_ws_message,
-        on_error=on_ws_error,
-        on_close=on_ws_close,
-    )
-    ws_app.run_forever()
-
-
-def command_input_thread():
-    """Thread to handle user input for sending nav requests."""
-    global ws_app
-    time.sleep(2)
-    while True:
-        try:
-            target = input("\n> 请输入想要导航的目标字符串（如：会议桌、沙发）:\n> ")
-            if target.strip() and ws_app and ws_app.sock and ws_app.sock.connected:
-                req = {
-                    "type": "nav_request",
-                    "target": target.strip(),
-                }
-                ws_app.send(json.dumps(req))
-        except EOFError:
-            break
-        except Exception:
-            pass
-
 
 def start_simulation():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -134,8 +66,6 @@ def start_simulation():
     rotate_remaining_deg = 0.0
 
     threading.Thread(target=poll_status, daemon=True).start()
-    threading.Thread(target=start_ws_client, daemon=True).start()
-    threading.Thread(target=command_input_thread, daemon=True).start()
 
     last_log_sec = -1
 
@@ -229,7 +159,7 @@ def start_simulation():
 
 if __name__ == "__main__":
     print("==========================================================")
-    print(" 综合校准与导航测试终端 (UWB + IMU + WebSocket)")
+    print(" 综合校准与定位测试终端 (UWB + IMU via UDP)")
     print("==========================================================")
     print("1. 确保已启动 web_app.py")
     print("2. 运行 Unreal Engine 并自动连接")

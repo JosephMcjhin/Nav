@@ -46,6 +46,9 @@ UWB_FILTER_ALPHA = 0.15  # 低通滤波系数：越小越平滑（0.05~0.3）。
 active_ws: dict = {}      # ws -> { 'ip': str, 'connected_at': float }
 uwb_calibrator = UwbCalibrationManager()
 nav_request_client_ws = None
+ue_client_ws = None
+glasses_client_ws = None
+last_missing_glasses_log = 0.0
 
 def broadcast(payload: dict):
     """Send JSON to all connected WebSocket clients."""
@@ -68,8 +71,68 @@ def send_json(ws, payload: dict) -> bool:
         ws.send(json.dumps(payload, ensure_ascii=False))
         return True
     except Exception:
-        active_ws.pop(ws, None)
+        cleanup_ws(ws)
         return False
+
+
+def send_to_ue(payload: dict) -> bool:
+    """Send JSON only to the registered UE client."""
+    return send_json(ue_client_ws, payload)
+
+
+def send_to_glasses(payload: dict) -> bool:
+    """Send JSON only to the registered glasses client."""
+    return send_json(glasses_client_ws, payload)
+
+
+def register_ws_role(ws, role: str):
+    """Track stable client roles so routing does not depend on nav requests."""
+    global ue_client_ws, glasses_client_ws, nav_request_client_ws
+
+    meta = active_ws.get(ws, {})
+    if meta.get("role") == role:
+        return
+
+    if role == "ue":
+        ue_client_ws = ws
+    elif role == "glasses":
+        glasses_client_ws = ws
+        nav_request_client_ws = ws
+    else:
+        log.warning(f"Unknown WebSocket role from {active_ws.get(ws, {}).get('ip', 'unknown')}: {role}")
+        return
+
+    meta["role"] = role
+    log.info(f"WebSocket client registered: ip={meta.get('ip', 'unknown')} role={role}")
+
+
+def get_ws_role(ws) -> str:
+    return active_ws.get(ws, {}).get("role", "unregistered")
+
+
+def cleanup_ws(ws):
+    global ue_client_ws, glasses_client_ws, nav_request_client_ws
+
+    meta = active_ws.get(ws, {})
+    if meta:
+        log.info(f"WebSocket client disconnected: ip={meta.get('ip', 'unknown')} role={meta.get('role', 'unregistered')}")
+
+    if ue_client_ws is ws:
+        ue_client_ws = None
+    if glasses_client_ws is ws:
+        glasses_client_ws = None
+    if nav_request_client_ws is ws:
+        nav_request_client_ws = None
+    active_ws.pop(ws, None)
+
+
+def log_missing_glasses_once():
+    global last_missing_glasses_log
+
+    now = time.time()
+    if now - last_missing_glasses_log >= 5.0:
+        last_missing_glasses_log = now
+        log.warning("No active glasses client to receive TTS audio.")
 
 
 def _generate_and_send_tts(target_ws, text: str, timestamp: int):
@@ -131,18 +194,18 @@ def set_target():
     """Set an absolute target coordinate for UE character navigation."""
     data = request.get_json(force=True)
     x, y, z = float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("z", 0))
-    broadcast({"type": "set_target", "x": x, "y": y, "z": z})
+    send_to_ue({"type": "set_target", "x": x, "y": y, "z": z})
     if ENABLE_VERBOSE_LOGS:
         log.info(f"set_target → x={x} y={y} z={z} to {len(active_ws)} clients")
-    return jsonify({"status": "ok", "clients": len(active_ws)})
+    return jsonify({"status": "ok", "ue_connected": ue_client_ws is not None})
 
 
 @app.route("/api/stop_navigation", methods=["POST"])
 def stop_navigation():
     """Immediately stop character navigation in UE."""
-    broadcast({"type": "stop_navigation"})
-    log.info(f"stop_navigation → Broadcasted to {len(active_ws)} clients")
-    return jsonify({"status": "ok", "clients": len(active_ws)})
+    send_to_ue({"type": "stop_navigation"})
+    log.info("stop_navigation → Sent to UE client")
+    return jsonify({"status": "ok", "ue_connected": ue_client_ws is not None})
 
 
 
@@ -247,8 +310,8 @@ def calibrate_clear():
 def ws_handler(ws):
     global nav_request_client_ws
     client_ip = request.remote_addr
-    log.info(f"WebSocket client connected from {client_ip}")
-    active_ws[ws] = {"ip": client_ip, "connected_at": time.time()}
+    log.info(f"WebSocket client connected: ip={client_ip} role=unregistered")
+    active_ws[ws] = {"ip": client_ip, "connected_at": time.time(), "role": "unregistered"}
     try:
         # Initial greeting and status sync
         with uwb_calibrator.lock:
@@ -277,7 +340,12 @@ def ws_handler(ws):
 
             msg_type = msg.get("type")
 
-            if msg_type == "imu":
+            if msg_type == "register":
+                role = str(msg.get("role", "")).strip().lower()
+                register_ws_role(ws, role)
+                send_json(ws, {"type": "status", "text": f"registered:{role}", "success": True})
+
+            elif msg_type == "imu":
                 raw_yaw = float(msg.get("yaw", 0.0))
                 # Update the latest raw IMU yaw for heading calibration
                 uwb_calibrator.update_imu_yaw(raw_yaw)
@@ -286,27 +354,33 @@ def ws_handler(ws):
                     continue
                 # Apply current offset and broadcast to UE
                 corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
-                broadcast({"type": "set_rotation", "yaw": corrected_yaw})
+                send_to_ue({"type": "set_rotation", "yaw": corrected_yaw})
 
             elif msg_type == "nav_request":
+                if get_ws_role(ws) != "glasses":
+                    log.info(f"Auto-registering WebSocket client as glasses from nav_request: ip={client_ip}")
+                register_ws_role(ws, "glasses")
                 target_str = msg.get("target", "")
                 cmd = parse_navigation_command(target_str)
                 if cmd:
                     nav_request_client_ws = ws
-                    broadcast({"type": "navigate_to", "destination": cmd.get("target", "")})
-                    ws.send(json.dumps({"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True}))
+                    send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    send_json(ws, {"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True})
                 else:
-                    ws.send(json.dumps({"type": "status", "text": "无法识别目标", "success": False}))
+                    send_json(ws, {"type": "status", "text": "无法识别目标", "success": False})
 
             elif msg_type == "stop_navigation":
-                broadcast({"type": "stop_navigation"})
+                send_to_ue({"type": "stop_navigation"})
                 log.info("Stop navigation command received from client.")
 
             elif msg_type == "nav_prompt":
+                if get_ws_role(ws) != "ue":
+                    log.info(f"Auto-registering WebSocket client as ue from nav_prompt: ip={client_ip}")
+                register_ws_role(ws, "ue")
                 text = msg.get("text", "")
                 # Create a millisecond timestamp to help the client identify the latest prompt
                 timestamp = int(time.time() * 1000)
-                target_ws = nav_request_client_ws
+                target_ws = glasses_client_ws or nav_request_client_ws
                 if target_ws in active_ws:
                     threading.Thread(
                         target=_generate_and_send_tts,
@@ -314,15 +388,13 @@ def ws_handler(ws):
                         daemon=True,
                     ).start()
                 else:
-                    log.warning("No active nav requester to receive TTS audio.")
+                    log_missing_glasses_once()
 
 
     except Exception as e:
         log.info(f"WS disconnect: {e}")
     finally:
-        if nav_request_client_ws is ws:
-            nav_request_client_ws = None
-        active_ws.pop(ws, None)
+        cleanup_ws(ws)
 
 
 
@@ -357,7 +429,7 @@ def _udp_uwb_listener(port: int = 9003):
                         continue
                     # Apply current offset and broadcast to UE
                     corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
-                    broadcast({"type": "set_rotation", "yaw": corrected_yaw})
+                    send_to_ue({"type": "set_rotation", "yaw": corrected_yaw})
                 continue
             
             if payload.get("name") == "Pos" and payload.get("deviceName", "").startswith("T"):
@@ -376,7 +448,7 @@ def _udp_uwb_listener(port: int = 9003):
                     transformed = uwb_calibrator.transform_uwb_to_ue(current_x, current_y)
                     if transformed:
                         ue_x, ue_y = transformed
-                        broadcast({"type": "set_target", "x": ue_x, "y": ue_y, "z": 0, "calibrated": True})
+                        send_to_ue({"type": "set_target", "x": ue_x, "y": ue_y, "z": 0, "calibrated": True})
         except Exception as e:
             pass
 
