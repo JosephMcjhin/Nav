@@ -390,6 +390,48 @@ def ws_handler(ws):
                 else:
                     log_missing_glasses_once()
 
+            # ── Calibration via WebSocket (代替 HTTP) ──────────────────────
+            elif msg_type == "calibrate_point":
+                ue_x = float(msg.get("x", 0))
+                ue_y = float(msg.get("y", 0))
+                point_index = msg.get("index", None)
+                valid_count, result_msg = uwb_calibrator.add_calibration_point(ue_x, ue_y, point_index)
+                if "No UWB signal" in result_msg:
+                    send_json(ws, {"type": "calibrate_point_result", "status": "error", "message": result_msg})
+                    log.warning(f"Calib point failed: {result_msg}")
+                else:
+                    log.info(result_msg)
+                    broadcast_status()
+                    send_json(ws, {"type": "calibrate_point_result", "status": "ok", "captured_count": valid_count})
+
+            elif msg_type == "calibrate_solve":
+                matrix, result_msg = uwb_calibrator.solve_transform()
+                if matrix:
+                    log.info(result_msg)
+                    broadcast_status()
+                    send_json(ws, {"type": "calibrate_solve_result", "status": "ok",
+                                   "matrix": {k: (list(v) if isinstance(v, tuple) else v) for k, v in matrix.items()}})
+                else:
+                    send_json(ws, {"type": "calibrate_solve_result", "status": "error", "message": result_msg})
+                    log.warning(f"Calib solve failed: {result_msg}")
+
+            elif msg_type == "calibrate_heading":
+                target_ue_yaw = float(msg.get("target_ue_yaw", 0))
+                offset, result_msg = uwb_calibrator.calibrate_heading(None, target_ue_yaw)
+                if offset is None:
+                    send_json(ws, {"type": "calibrate_heading_result", "status": "error", "message": result_msg})
+                    log.warning(f"Calib heading failed: {result_msg}")
+                else:
+                    log.info(result_msg)
+                    broadcast_status()
+                    send_json(ws, {"type": "calibrate_heading_result", "status": "ok", "imu_offset": offset})
+
+            elif msg_type == "calibrate_clear":
+                uwb_calibrator.clear()
+                broadcast_status()
+                log.info("Calibration cleared via WebSocket.")
+                send_json(ws, {"type": "calibrate_clear_result", "status": "ok"})
+
 
     except Exception as e:
         log.info(f"WS disconnect: {e}")

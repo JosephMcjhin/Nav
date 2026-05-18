@@ -4,16 +4,9 @@
 #include "Components/Button.h"
 #include "Components/EditableTextBox.h"
 #include "Components/TextBlock.h"
-#include "Dom/JsonObject.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
-#include "HttpModule.h"
-#include "Interfaces/IHttpRequest.h"
-#include "Interfaces/IHttpResponse.h"
 #include "Kismet/GameplayStatics.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
 
 void UBeaconCalibrationWidget::NativeConstruct() {
   Super::NativeConstruct();
@@ -57,6 +50,8 @@ void UBeaconCalibrationWidget::NativeConstruct() {
         this, &UBeaconCalibrationWidget::OnWSConnectionError);
     ConnComp->OnServerStatus.AddDynamic(
         this, &UBeaconCalibrationWidget::OnServerStatusReceived);
+    ConnComp->OnCalibrationResult.AddDynamic(
+        this, &UBeaconCalibrationWidget::OnCalibrationResultReceived);
   }
 
   SwitchUIState(0);
@@ -99,45 +94,13 @@ void UBeaconCalibrationWidget::CapturePoint(int32 PointIndex) {
 
   FVector Loc = Char->GetActorLocation();
 
-  TSharedPtr<FJsonObject> JsonObj = MakeShareable(new FJsonObject());
-  JsonObj->SetNumberField(TEXT("x"), Loc.X);
-  JsonObj->SetNumberField(TEXT("y"), Loc.Y);
-  // Pass 0-based index so server overwrites the correct calibration slot
-  JsonObj->SetNumberField(TEXT("index"), PointIndex - 1);
+  UE_LOG(LogTemp, Log, TEXT("[BeaconCalib] CapturePoint(%d) called | Loc=(%.1f, %.1f, %.1f)"), PointIndex, Loc.X, Loc.Y, Loc.Z);
 
-  FString OutputString;
-  TSharedRef<TJsonWriter<>> Writer =
-      TJsonWriterFactory<>::Create(&OutputString);
-  FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
-
-  HttpPost(TEXT("/api/calibrate/point"), OutputString,
-           [this, PointIndex](const FString &ResponseBody) {
-             TSharedPtr<FJsonObject> ResponseJson;
-             TSharedRef<TJsonReader<>> Reader =
-                 TJsonReaderFactory<>::Create(ResponseBody);
-
-             const bool bParsed =
-                 FJsonSerializer::Deserialize(Reader, ResponseJson) &&
-                 ResponseJson.IsValid();
-             FString StatusValue;
-             const bool bOk = bParsed &&
-                              ResponseJson->TryGetStringField(TEXT("status"),
-                                                              StatusValue) &&
-                              StatusValue == TEXT("ok");
-
-             if (!bOk) {
-               FString ErrorMessage = TEXT("Failed to capture point.");
-               if (bParsed) {
-                 ResponseJson->TryGetStringField(TEXT("message"), ErrorMessage);
-               }
-               SetStatus(ErrorMessage);
-               return;
-             }
-
-             CapturedFlags |= (1 << (PointIndex - 1));
-             SetStatus(FString::Printf(TEXT("Point %d Captured"), PointIndex));
-             RefreshUI();
-           });
+  PendingPointIndex = PointIndex;
+  FString JsonStr = FString::Printf(TEXT("{\"type\":\"calibrate_point\",\"x\":%.1f,\"y\":%.1f,\"index\":%d}"),
+                                    Loc.X, Loc.Y, PointIndex - 1);
+  ConnComp->SendString(JsonStr);
+  SetStatus(FString::Printf(TEXT("Sending point %d..."), PointIndex));
 }
 
 void UBeaconCalibrationWidget::SolveCalibration() {
@@ -147,34 +110,7 @@ void UBeaconCalibrationWidget::SolveCalibration() {
   }
 
   SetStatus(TEXT("Calculating beacon positions..."));
-  HttpPost(TEXT("/api/calibrate/solve"), TEXT("{}"),
-           [this](const FString &ResponseBody) {
-             TSharedPtr<FJsonObject> ResponseJson;
-             TSharedRef<TJsonReader<>> Reader =
-                 TJsonReaderFactory<>::Create(ResponseBody);
-
-             const bool bParsed =
-                 FJsonSerializer::Deserialize(Reader, ResponseJson) &&
-                 ResponseJson.IsValid();
-             FString StatusValue;
-             const bool bOk = bParsed &&
-                              ResponseJson->TryGetStringField(TEXT("status"),
-                                                              StatusValue) &&
-                              StatusValue == TEXT("ok");
-
-             if (!bOk) {
-               FString ErrorMessage = TEXT("Calibration solve failed.");
-               if (bParsed) {
-                 ResponseJson->TryGetStringField(TEXT("message"), ErrorMessage);
-               }
-               SetStatus(ErrorMessage);
-               SwitchUIState(1);
-               return;
-             }
-
-             SetStatus(TEXT("Position calibration solved. IMU calibration still required."));
-             SwitchUIState(1);
-           });
+  ConnComp->SendString(TEXT("{\"type\":\"calibrate_solve\"}"));
 }
 
 void UBeaconCalibrationWidget::JoystickInput(float AxisX, float AxisY) {
@@ -254,29 +190,40 @@ void UBeaconCalibrationWidget::SwitchUIState(int32 State) {
         ESlateVisibility::Visible); // Always visible for feedback
 }
 
-void UBeaconCalibrationWidget::HttpPost(
-    const FString &RelPath, const FString &JsonBody,
-    TFunction<void(const FString &)> OnResponse) {
-  if (!ConnComp)
-    return;
+void UBeaconCalibrationWidget::OnCalibrationResultReceived(const FString& OpType, bool bSuccess, const FString& Message) {
+  UE_LOG(LogTemp, Log, TEXT("[BeaconCalib] CalibResult | Op=%s | bSuccess=%d | Msg=%s"), *OpType, bSuccess, *Message);
 
-  FHttpModule *Http = &FHttpModule::Get();
-  auto Request = Http->CreateRequest();
-  Request->SetURL(ConnComp->ServerBaseURL + RelPath);
-  Request->SetVerb(TEXT("POST"));
-  Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
-  Request->SetContentAsString(JsonBody);
-
-  if (OnResponse) {
-    Request->OnProcessRequestComplete().BindLambda(
-        [OnResponse](FHttpRequestPtr, FHttpResponsePtr Response, bool bOK) {
-          FString Body = (bOK && Response) ? Response->GetContentAsString()
-                                           : TEXT("HTTP error");
-          OnResponse(Body);
-        });
+  if (OpType == TEXT("calibrate_point_result")) {
+    if (bSuccess) {
+      CapturedFlags |= (1 << (PendingPointIndex - 1));
+      SetStatus(FString::Printf(TEXT("Point %d Captured"), PendingPointIndex));
+      RefreshUI();
+    } else {
+      SetStatus(Message.IsEmpty() ? TEXT("Failed to capture point.") : Message);
+    }
+  } else if (OpType == TEXT("calibrate_solve_result")) {
+    if (bSuccess) {
+      SetStatus(TEXT("Position calibration solved. IMU calibration still required."));
+      SwitchUIState(1);
+    } else {
+      SetStatus(Message.IsEmpty() ? TEXT("Calibration solve failed.") : Message);
+    }
+  } else if (OpType == TEXT("calibrate_heading_result")) {
+    if (bSuccess) {
+      SetStatus(TEXT("Heading aligned and saved to server."));
+    } else {
+      SetStatus(Message.IsEmpty() ? TEXT("Heading calibration failed.") : Message);
+    }
+  } else if (OpType == TEXT("calibrate_clear_result")) {
+    CapturedFlags = 0;
+    SetStatus(TEXT("All caches cleared. Disconnecting."));
+    if (ConnComp) {
+      ConnComp->ClearIPCache();
+      ConnComp->Disconnect();
+    }
+    SwitchUIState(0);
+    RefreshUI();
   }
-
-  Request->ProcessRequest();
 }
 
 // ─── Button delegate handlers (declared in .h too, see below) ───────────────
@@ -356,12 +303,10 @@ void UBeaconCalibrationWidget::OnCalibrateHeadingClicked() {
       float CurrentUeYaw = Owner->GetActorRotation().Yaw;
 
       FString JsonStr =
-          FString::Printf(TEXT("{\"imu_yaw\": %f, \"target_ue_yaw\": %f}"),
+          FString::Printf(TEXT("{\"type\":\"calibrate_heading\",\"imu_yaw\":%f,\"target_ue_yaw\":%f}"),
                           CurrentImuYaw, CurrentUeYaw);
-      HttpPost(TEXT("/api/calibrate/heading"), JsonStr,
-               [this](const FString &Response) {
-                 SetStatus(TEXT("Heading aligned and saved to server."));
-               });
+      ConnComp->SendString(JsonStr);
+      SetStatus(TEXT("Sending heading calibration..."));
     }
   }
 }
@@ -370,18 +315,6 @@ void UBeaconCalibrationWidget::OnClearCacheClicked() {
   if (!ConnComp)
     return;
 
-  HttpPost(TEXT("/api/calibrate/clear"), TEXT("{}"),
-           [this](const FString &Response) {
-             CapturedFlags = 0;
-             SetStatus(TEXT("All caches cleared. Disconnecting."));
-             
-             // Thorough Reset: clear client IP cache, disconnect, go to Stage 0
-             if (ConnComp) {
-                 ConnComp->ClearIPCache();
-                 ConnComp->Disconnect();
-             }
-             SwitchUIState(0);
-             
-             RefreshUI();
-           });
+  ConnComp->SendString(TEXT("{\"type\":\"calibrate_clear\"}"));
+  SetStatus(TEXT("Clearing calibration cache..."));
 }

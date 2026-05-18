@@ -9,6 +9,7 @@ class IWebSocket;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnConnectionSuccess, const FString&, URL);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnConnectionFailed, const FString&, Error);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnServerStatus, bool, bIsCalibrated, bool, bIsImuCalibrated, float, ImuOffset, int32, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnCalibrationResult, const FString&, OpType, bool, bSuccess, const FString&, Message);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PROJECT001_API UServerConnectionComponent : public UActorComponent {
@@ -40,6 +41,9 @@ public:
 
   UPROPERTY(BlueprintAssignable, Category = "Network")
   FOnServerStatus OnServerStatus;
+
+  UPROPERTY(BlueprintAssignable, Category = "Network")
+  FOnCalibrationResult OnCalibrationResult;
 
   /** Saves the server IP to local USaveGame for future sessions. */
   void SaveIPToCache(const FString &IP);

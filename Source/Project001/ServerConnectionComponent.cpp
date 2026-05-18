@@ -247,6 +247,19 @@ void UServerConnectionComponent::HandleJsonCommand(
       if (!Owner)
         return;
 
+      // ── Calibration results (no Owner needed) ──────────────────────
+      if (MsgType == TEXT("calibrate_point_result") ||
+          MsgType == TEXT("calibrate_solve_result") ||
+          MsgType == TEXT("calibrate_heading_result") ||
+          MsgType == TEXT("calibrate_clear_result")) {
+        FString StatusValue, Msg;
+        JsonObject->TryGetStringField(TEXT("status"), StatusValue);
+        JsonObject->TryGetStringField(TEXT("message"), Msg);
+        const bool bSuccess = StatusValue == TEXT("ok");
+        OnCalibrationResult.Broadcast(MsgType, bSuccess, Msg);
+        return;
+      }
+
       // Dispatch "set_target" to UWBTargetComponent
       if (MsgType == TEXT("set_target")) {
         double X = 0, Y = 0;

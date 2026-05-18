@@ -109,6 +109,7 @@ private:
 
   // Tracks which points have been captured (0 = not yet)
   int32 CapturedFlags = 0; // bitmask: bit0=P1, bit1=P2, bit2=P3
+  int32 PendingPointIndex = 0; // which point is being captured (1-3)
 
   // Accumulated joystick axes, applied each tick
   float JoystickX = 0.f;
@@ -117,10 +118,6 @@ private:
   void RefreshUI();
   void SetStatus(const FString &Msg);
   void SwitchUIState(int32 State);
-
-  // HTTP helper – fires-and-forgets a POST to the server
-  void HttpPost(const FString &RelPath, const FString &JsonBody,
-                TFunction<void(const FString &)> OnResponse = nullptr);
 
   // Internal button click handlers – bound via AddDynamic in NativeConstruct
   UFUNCTION()
@@ -144,6 +141,9 @@ private:
 
   UFUNCTION()
   void OnServerStatusReceived(bool bIsCalibrated, bool bIsImuCalibrated, float ImuOffset, int32 Points);
+
+  UFUNCTION()
+  void OnCalibrationResultReceived(const FString& OpType, bool bSuccess, const FString& Message);
 
   UFUNCTION()
   void OnConnectClicked();
