@@ -76,8 +76,31 @@ def send_json(ws, payload: dict) -> bool:
 
 
 def send_to_ue(payload: dict) -> bool:
-    """Send JSON only to the registered UE client."""
-    return send_json(ue_client_ws, payload)
+    """Send JSON to the UE client, with a single-client fallback for mobile."""
+    if ue_client_ws in active_ws:
+        ok = send_json(ue_client_ws, payload)
+        if ok:
+            return True
+
+    ue_clients = [ws for ws, meta in active_ws.items() if meta.get("role") == "ue"]
+    if ue_clients:
+        sent = False
+        for ws in ue_clients:
+            sent = send_json(ws, payload) or sent
+        return sent
+
+    if len(active_ws) == 1:
+        only_ws = next(iter(active_ws.keys()))
+        meta = active_ws.get(only_ws, {})
+        log.warning(
+            f"No registered UE client; falling back to the only WebSocket "
+            f"client ip={meta.get('ip', 'unknown')} role={meta.get('role', 'unregistered')} "
+            f"payload={payload.get('type')}"
+        )
+        return send_json(only_ws, payload)
+
+    log.warning(f"No UE client available for payload={payload.get('type')} active_clients={len(active_ws)}")
+    return False
 
 
 def send_to_glasses(payload: dict) -> bool:
@@ -364,7 +387,11 @@ def ws_handler(ws):
                 cmd = parse_navigation_command(target_str)
                 if cmd:
                     nav_request_client_ws = ws
-                    send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    sent_to_ue = send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    log.info(
+                        f"Navigation request target={cmd.get('target', '')} "
+                        f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
+                    )
                     send_json(ws, {"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True})
                 else:
                     send_json(ws, {"type": "status", "text": "无法识别目标", "success": False})

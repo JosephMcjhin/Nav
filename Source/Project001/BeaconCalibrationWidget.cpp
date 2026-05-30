@@ -44,13 +44,13 @@ void UBeaconCalibrationWidget::NativeConstruct() {
   }
 
   if (ConnComp) {
-    ConnComp->OnConnectionSuccess.AddDynamic(
+    ConnComp->OnConnectionSuccess.AddUniqueDynamic(
         this, &UBeaconCalibrationWidget::OnWSConnected);
-    ConnComp->OnConnectionFailed.AddDynamic(
+    ConnComp->OnConnectionFailed.AddUniqueDynamic(
         this, &UBeaconCalibrationWidget::OnWSConnectionError);
-    ConnComp->OnServerStatus.AddDynamic(
+    ConnComp->OnServerStatus.AddUniqueDynamic(
         this, &UBeaconCalibrationWidget::OnServerStatusReceived);
-    ConnComp->OnCalibrationResult.AddDynamic(
+    ConnComp->OnCalibrationResult.AddUniqueDynamic(
         this, &UBeaconCalibrationWidget::OnCalibrationResultReceived);
   }
 
@@ -70,6 +70,17 @@ void UBeaconCalibrationWidget::NativeTick(const FGeometry &MyGeometry,
 void UBeaconCalibrationWidget::SetConnectionComponent(
     UServerConnectionComponent *InComponent) {
   ConnComp = InComponent;
+
+  if (ConnComp) {
+    ConnComp->OnConnectionSuccess.AddUniqueDynamic(
+        this, &UBeaconCalibrationWidget::OnWSConnected);
+    ConnComp->OnConnectionFailed.AddUniqueDynamic(
+        this, &UBeaconCalibrationWidget::OnWSConnectionError);
+    ConnComp->OnServerStatus.AddUniqueDynamic(
+        this, &UBeaconCalibrationWidget::OnServerStatusReceived);
+    ConnComp->OnCalibrationResult.AddUniqueDynamic(
+        this, &UBeaconCalibrationWidget::OnCalibrationResultReceived);
+  }
 
   // Handle race condition: if component already connected before widget was bound,
   // immediately synchronize UI state.

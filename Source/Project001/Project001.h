@@ -4,3 +4,9 @@
 
 #include "CoreMinimal.h"
 
+namespace Project001Console {
+bool IsLocalNavTTSEnabled();
+void SetLocalNavTTSEnabled(bool bEnabled);
+void SpeakLocalNavText(const FString &Text);
+}
+
