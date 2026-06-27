@@ -405,6 +405,11 @@ def ws_handler(ws):
                         f"Navigation request target={cmd.get('target', '')} "
                         f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
                     )
+                    sent_to_ue = send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    log.info(
+                        f"Navigation request target={cmd.get('target', '')} "
+                        f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
+                    )
                     send_json(ws, {"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True})
                 else:
                     send_json(ws, {"type": "status", "text": "无法识别目标", "success": False})

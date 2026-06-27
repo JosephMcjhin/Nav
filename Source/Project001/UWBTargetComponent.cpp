@@ -1,9 +1,11 @@
 #include "UWBTargetComponent.h"
 
+
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
@@ -46,7 +48,9 @@ void UUWBTargetComponent::TickComponent(
 
   APawn *OwnerPawn = Cast<APawn>(GetOwner());
   if (!OwnerPawn) {
+  if (!OwnerPawn) {
     return;
+  }
   }
 
   if (APlayerController *PC =
@@ -72,6 +76,8 @@ void UUWBTargetComponent::TickComponent(
     if (bManualActive) {
       if (PC->PlayerCameraManager) {
         FRotator CamRot = PC->PlayerCameraManager->GetCameraRotation();
+        // In this top-down setup, camera Z projected to ground matches the
+        // user's forward direction better than the camera forward vector.
         // In this top-down setup, camera Z projected to ground matches the
         // user's forward direction better than the camera forward vector.
         FVector CamUp = FRotationMatrix(CamRot).GetUnitAxis(EAxis::Z);
@@ -109,6 +115,10 @@ void UUWBTargetComponent::TickComponent(
         SmoothedTargetLocation, TargetLocation, DeltaTime, TargetSmoothingSpeed);
 
     const FVector CurrentLoc = OwnerPawn->GetActorLocation();
+    SmoothedTargetLocation = FMath::VInterpTo(
+        SmoothedTargetLocation, TargetLocation, DeltaTime, TargetSmoothingSpeed);
+
+    const FVector CurrentLoc = OwnerPawn->GetActorLocation();
     FVector Direction =
         FVector(SmoothedTargetLocation.X, SmoothedTargetLocation.Y, CurrentLoc.Z) -
         CurrentLoc;
@@ -121,7 +131,23 @@ void UUWBTargetComponent::TickComponent(
         (NowSeconds - LastTargetUpdateTime) <= TargetStreamHoldSeconds;
 
     if (DistanceCm > AutoMoveDeadZoneCm) {
+        FVector(SmoothedTargetLocation.X, SmoothedTargetLocation.Y, CurrentLoc.Z) -
+        CurrentLoc;
+    Direction.Z = 0.0f;
+
+    const float DistanceCm = Direction.Size2D();
+    const double NowSeconds =
+        GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+    const bool bHasFreshTargetStream =
+        (NowSeconds - LastTargetUpdateTime) <= TargetStreamHoldSeconds;
+
+    if (DistanceCm > AutoMoveDeadZoneCm) {
       Direction.Normalize();
+      const float InputScale =
+          FMath::GetMappedRangeValueClamped(FVector2D(0.0f, 160.0f),
+                                            FVector2D(0.12f, 1.0f), DistanceCm);
+      OwnerPawn->AddMovementInput(Direction, InputScale);
+    } else if (!bHasFreshTargetStream) {
       const float InputScale =
           FMath::GetMappedRangeValueClamped(FVector2D(0.0f, 160.0f),
                                             FVector2D(0.12f, 1.0f), DistanceCm);
@@ -142,6 +168,7 @@ void UUWBTargetComponent::TickComponent(
     FRotator CurrentRotation = OwnerPawn->GetActorRotation();
     CurrentRotation.Yaw = FMath::FixedTurn(
         CurrentRotation.Yaw, SmoothedTargetRotation.Yaw,
+        CurrentRotation.Yaw, SmoothedTargetRotation.Yaw,
         RotationInterpSpeedDegPerSec * DeltaTime);
     OwnerPawn->SetActorRotation(CurrentRotation);
   }
@@ -150,9 +177,37 @@ void UUWBTargetComponent::TickComponent(
 void UUWBTargetComponent::SetUWBTarget(float InX, float InY) {
   AActor *Owner = GetOwner();
   if (!Owner) {
+  if (!Owner) {
     return;
   }
+  }
 
+  const double CurrentSampleTime =
+      GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+  const FVector IncomingTarget(InX, InY, Owner->GetActorLocation().Z);
+
+  if (ACharacter *OwnerCharacter = Cast<ACharacter>(Owner)) {
+    if (UCharacterMovementComponent *MoveComp =
+            OwnerCharacter->GetCharacterMovement()) {
+      const double DeltaSeconds = CurrentSampleTime - LastSpeedSampleTime;
+      if (LastSpeedSampleTime > 0.0 && DeltaSeconds > KINDA_SMALL_NUMBER) {
+        const float CatchUpDistanceCm =
+            FVector::Dist2D(OwnerCharacter->GetActorLocation(), IncomingTarget);
+        MoveComp->MaxWalkSpeed =
+            static_cast<float>(CatchUpDistanceCm / DeltaSeconds);
+      }
+    }
+  }
+
+  if (bHasTarget) {
+    TargetLocation = FMath::Lerp(TargetLocation, IncomingTarget, 0.35f);
+  } else {
+    TargetLocation = IncomingTarget;
+    SmoothedTargetLocation = Owner->GetActorLocation();
+  }
+
+  LastTargetUpdateTime = CurrentSampleTime;
+  LastSpeedSampleTime = CurrentSampleTime;
   const double CurrentSampleTime =
       GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
   const FVector IncomingTarget(InX, InY, Owner->GetActorLocation().Z);
@@ -192,6 +247,9 @@ void UUWBTargetComponent::SetUWBTarget(float InX, float InY) {
 void UUWBTargetComponent::SetIMURotation(float Yaw) {
   // IMU data drives ONLY the actor rotation (yaw).
   TargetRotation = FRotator(0.0f, Yaw, 0.0f);
+  if (!bHasRotation) {
+    SmoothedTargetRotation = TargetRotation;
+  }
   if (!bHasRotation) {
     SmoothedTargetRotation = TargetRotation;
   }
