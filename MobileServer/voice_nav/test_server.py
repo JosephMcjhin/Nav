@@ -1,5 +1,6 @@
 import json
 import math
+import random
 import socket
 import threading
 import time
@@ -45,25 +46,24 @@ def start_simulation():
     ]
 
     # Post-calibration loop:
-    # 1. Walk  (0,0) -> (5,0), then rotate CCW 135 deg
-    # 2. Walk  (5,0) -> (0,5), then rotate CCW 135 deg
-    # 3. Walk  (0,5) -> (0,0), then rotate CCW  90 deg
+    # 位置：沿固定折线 (0,0)->(5,0)->(0,5)->(0,0) 循环行走。
+    # 朝向：行走过程中每秒 2 次随机地向顺时针/逆时针转 30 度（不停下、与位置解耦）。
     LOOP_SEGMENTS = [
-        {"target": (5.0, 0.0), "turn_ccw_deg": 135.0},
-        {"target": (0.0, 5.0), "turn_ccw_deg": 135.0},
-        {"target": (0.0, 0.0), "turn_ccw_deg": 90.0},
+        (5.0, 0.0),
+        (0.0, 5.0),
+        (0.0, 0.0),
     ]
 
     WALK_SPEED_MPS = 1.0
-    ROTATE_SPEED_DPS = 90.0
+    TURN_INTERVAL_SEC = 0.5     # 一秒 2 次转向
+    TURN_ANGLE_DEG = 30.0       # 每次随机 ±30 度
     UPDATE_HZ = 10
 
     segment_idx = 0
-    phase = "walk"
     pos_x = 0.0
     pos_y = 0.0
-    current_yaw = 0.0
-    rotate_remaining_deg = 0.0
+    current_yaw = 0.0           # 单位：度，CCW 为正
+    last_turn_sec = 0.0
 
     threading.Thread(target=poll_status, daemon=True).start()
 
@@ -72,65 +72,49 @@ def start_simulation():
     try:
         while True:
             dt = 1.0 / UPDATE_HZ
+            now_sec = time.time()
             state = sim_state
 
             if state < 3:
                 tag_uwb_x, tag_uwb_y = CALIB_POINTS[state]
                 yaw_to_send = 0.0
             else:
-                segment = LOOP_SEGMENTS[segment_idx]
-                wx, wy = segment["target"]
+                # 位置：沿固定折线推进
+                wx, wy = LOOP_SEGMENTS[segment_idx]
                 dx = wx - pos_x
                 dy = wy - pos_y
                 dist = math.hypot(dx, dy)
+                if dist <= WALK_SPEED_MPS * dt:
+                    # 到点 → 切到下一段，继续走（不停止、不专门转圈）
+                    pos_x, pos_y = wx, wy
+                    segment_idx = (segment_idx + 1) % len(LOOP_SEGMENTS)
+                else:
+                    step = WALK_SPEED_MPS * dt
+                    pos_x += (dx / dist) * step
+                    pos_y += (dy / dist) * step
 
-                if phase == "walk":
-                    if dist <= WALK_SPEED_MPS * dt:
-                        pos_x, pos_y = wx, wy
-                        rotate_remaining_deg = segment["turn_ccw_deg"]
-                        phase = "rotate"
-                        print(
-                            f"\n[Sim] Arrived at ({wx:.1f}, {wy:.1f}) -> "
-                            f"ROTATING CCW {rotate_remaining_deg:.0f} deg\n> ",
-                            end="",
-                        )
-                    else:
-                        step = WALK_SPEED_MPS * dt
-                        pos_x += (dx / dist) * step
-                        pos_y += (dy / dist) * step
-
-                elif phase == "rotate":
-                    step_deg = min(rotate_remaining_deg, ROTATE_SPEED_DPS * dt)
-                    current_yaw = (current_yaw + step_deg) % 360.0
-                    rotate_remaining_deg -= step_deg
-
-                    if rotate_remaining_deg <= 1e-6:
-                        segment_idx = (segment_idx + 1) % len(LOOP_SEGMENTS)
-                        next_target = LOOP_SEGMENTS[segment_idx]["target"]
-                        phase = "walk"
-                        print(
-                            f"\n[Sim] Rotate done -> now WALKING to "
-                            f"({next_target[0]:.1f}, {next_target[1]:.1f}) "
-                            f"with yaw {current_yaw:.1f}\n> ",
-                            end="",
-                        )
+                # 朝向：每秒 2 次随机 ±30 度（与位置完全独立，边走边转）
+                if now_sec - last_turn_sec >= TURN_INTERVAL_SEC:
+                    last_turn_sec = now_sec
+                    direction = random.choice([-1.0, 1.0])
+                    current_yaw = (current_yaw + direction * TURN_ANGLE_DEG) % 360.0
 
                 tag_uwb_x = pos_x
                 tag_uwb_y = pos_y
+                # IMU 朝向：UE 约定（与原代码一致，CCW 取反）
                 yaw_to_send = (-current_yaw) % 360.0
 
-            should_send_uwb = (state < 3) or (phase == "walk")
-            if should_send_uwb:
-                uwb_payload = {
-                    "name": "Pos",
-                    "deviceName": "T1",
-                    "uid": "sim-tag-001",
-                    "data": {"pos": [tag_uwb_x, tag_uwb_y, 0.0]},
-                }
-                sock.sendto(
-                    json.dumps(uwb_payload).encode("utf-8"),
-                    (UDP_TARGET_IP, UDP_TARGET_PORT),
-                )
+            # UWB 位置一直发
+            uwb_payload = {
+                "name": "Pos",
+                "deviceName": "T1",
+                "uid": "sim-tag-001",
+                "data": {"pos": [tag_uwb_x, tag_uwb_y, 0.0]},
+            }
+            sock.sendto(
+                json.dumps(uwb_payload).encode("utf-8"),
+                (UDP_TARGET_IP, UDP_TARGET_PORT),
+            )
 
             imu_payload = {
                 "id": "G01",
@@ -146,9 +130,12 @@ def start_simulation():
             cur_sec = int(time.time())
             if cur_sec != last_log_sec and cur_sec % 5 == 0:
                 last_log_sec = cur_sec
-                if state < 3:
-                    labels = ["P1(0,0)", "P2(5,0)", "P3(0,5)"]
-                    _ = labels[state]
+                if state >= 3:
+                    print(
+                        f"[Sim] pos=({pos_x:.2f},{pos_y:.2f}) "
+                        f"seg={segment_idx} yaw={current_yaw:.1f}°",
+                        flush=True,
+                    )
 
             time.sleep(dt)
 
@@ -169,9 +156,7 @@ if __name__ == "__main__":
     print("   - 点3 对应 UWB P3(0,5)，朝向 0 度")
     print("   - UE 端点击解算后，进入循环运动测试")
     print("4. 测试阶段:")
-    print("   - (0,0) -> (5,0) -> 左转 135 度")
-    print("   - (5,0) -> (0,5) -> 左转 135 度")
-    print("   - (0,5) -> (0,0) -> 左转 90 度")
-    print("   - 按以上序列循环")
+    print("   - 位置: 沿固定折线 (0,0)->(5,0)->(0,5)->(0,0) 循环行走")
+    print("   - 朝向: 行走中每秒 2 次随机向顺/逆时针转 30 度（边走边转）")
     print("==========================================================\n")
     start_simulation()

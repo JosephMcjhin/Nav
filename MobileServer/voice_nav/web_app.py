@@ -10,18 +10,15 @@ import json
 import logging
 import threading
 import time
-import asyncio
 import base64
-import io
 
 import numpy as np
 from flask import Flask, jsonify, request
 from flask_sock import Sock
-from pydub import AudioSegment
-import edge_tts
 
-from modules.command_parser import parse_navigation_command
+from modules.command_parser import parse_navigation_command, DESTINATION_MAP
 from modules.location_calibration import UwbCalibrationManager
+from modules.tts_engine import get_engine as get_tts_engine
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="[Server] %(message)s")
@@ -49,6 +46,7 @@ nav_request_client_ws = None
 ue_client_ws = None
 glasses_client_ws = None
 last_missing_glasses_log = 0.0
+last_no_ue_log = 0.0
 
 def broadcast(payload: dict):
     """Send JSON to all connected WebSocket clients."""
@@ -76,8 +74,47 @@ def send_json(ws, payload: dict) -> bool:
 
 
 def send_to_ue(payload: dict) -> bool:
-    """Send JSON only to the registered UE client."""
-    return send_json(ue_client_ws, payload)
+    """Send JSON to the UE client, with a single-client fallback for mobile."""
+    if ue_client_ws in active_ws:
+        ok = send_json(ue_client_ws, payload)
+        if ok:
+            return True
+
+    ue_clients = [ws for ws, meta in active_ws.items() if meta.get("role") == "ue"]
+    if ue_clients:
+        sent = False
+        for ws in ue_clients:
+            sent = send_json(ws, payload) or sent
+        return sent
+
+    if len(active_ws) == 1:
+        only_ws = next(iter(active_ws.keys()))
+        meta = active_ws.get(only_ws, {})
+        log.warning(
+            f"No registered UE client; falling back to the only WebSocket "
+            f"client ip={meta.get('ip', 'unknown')} role={meta.get('role', 'unregistered')} "
+            f"payload={payload.get('type')}"
+        )
+        return send_json(only_ws, payload)
+
+    _log_no_ue_client_once()
+    return False
+
+
+def _log_no_ue_client_once():
+    """Throttle the 'No UE client available' warning to once per 5s.
+
+    test_server.py fires set_target / set_rotation many times per second,
+    which would otherwise flood the log when UE is not connected.
+    """
+    global last_no_ue_log
+    now = time.time()
+    if now - last_no_ue_log >= 5.0:
+        last_no_ue_log = now
+        log.warning(
+            f"No UE client available active_clients={len(active_ws)} "
+            f"(throttled 5s)"
+        )
 
 
 def send_to_glasses(payload: dict) -> bool:
@@ -135,40 +172,39 @@ def log_missing_glasses_once():
         log.warning("No active glasses client to receive TTS audio.")
 
 
-def _generate_and_send_tts(target_ws, text: str, timestamp: int):
-    """Generate TTS off-thread and send it only to the requesting client."""
-    pcm_data = asyncio.run(_generate_tts_pcm(text))
-    if pcm_data:
-        audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
-        send_json(target_ws, {
-            "type": "nav_audio",
-            "text": text,
-            "audio": audio_b64,
-            "timestamp": timestamp,
-        })
-        log.info(f"Sent TTS audio to nav requester (timestamp: {timestamp})")
-    else:
-        send_json(target_ws, {"type": "nav_prompt", "text": text})
+def _stream_and_send_tts(target_ws, text: str, timestamp: int):
+    """Stream TTS audio chunks to the requesting client.
 
-async def _generate_tts_pcm(text: str) -> bytes:
-    """Convert text to 24000Hz 16-bit Mono PCM using edge-tts."""
-    try:
-        communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
-        audio_data = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_data += chunk["data"]
-        
-        if not audio_data:
-            return b""
+    Pushes a sequence of WS messages produced by the TTSEngine:
+      nav_audio_start → nav_audio_chunk* → nav_audio_end
+    The client plays chunks as they arrive (low first-byte latency).
+    On synthesis failure the engine emits a nav_prompt text fallback.
+    """
+    t_recv = time.time()
+    log.info(
+        f"[TTS] request received: text={text[:40]!r} ts={timestamp} "
+        f"backend=edge-tts"
+    )
 
-        # Convert MP3 (from edge-tts) to PCM 24000Hz Mono
-        audio = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
-        audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
-        return audio.raw_data
-    except Exception as e:
-        log.error(f"TTS Generation Error: {e}")
-        return b""
+    engine = get_tts_engine()
+    n_chunks = 0
+    t_first_packet = None
+    for msg in engine.build_ws_stream_messages(text, timestamp):
+        if t_first_packet is None and msg.get("type") == "nav_audio_start":
+            t_first_packet = time.time()
+            log.info(
+                f"[TTS] first packet (nav_audio_start) sent: "
+                f"first-byte latency={( t_first_packet - t_recv) * 1000:.0f}ms"
+            )
+        if msg.get("type") == "nav_audio_chunk":
+            n_chunks += 1
+        send_json(target_ws, msg)
+
+    total_ms = (time.time() - t_recv) * 1000
+    log.info(
+        f"[TTS] done: total={total_ms:.0f}ms chunks={n_chunks} "
+        f"backend={engine.backend_name} ts={timestamp}"
+    )
 
 
 
@@ -364,7 +400,11 @@ def ws_handler(ws):
                 cmd = parse_navigation_command(target_str)
                 if cmd:
                     nav_request_client_ws = ws
-                    send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    sent_to_ue = send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
+                    log.info(
+                        f"Navigation request target={cmd.get('target', '')} "
+                        f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
+                    )
                     send_json(ws, {"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True})
                 else:
                     send_json(ws, {"type": "status", "text": "无法识别目标", "success": False})
@@ -383,7 +423,7 @@ def ws_handler(ws):
                 target_ws = glasses_client_ws or nav_request_client_ws
                 if target_ws in active_ws:
                     threading.Thread(
-                        target=_generate_and_send_tts,
+                        target=_stream_and_send_tts,
                         args=(target_ws, text, timestamp),
                         daemon=True,
                     ).start()
@@ -503,6 +543,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument(
+        "--tts-backend",
+        choices=["edge", "local"],
+        default="edge",
+        help="TTS 后端：edge=云端 edge-tts（默认，质量好需联网）；"
+             "local=本地 PowerShell System.Speech（零延迟机械音）",
+    )
     args = parser.parse_args()
 
     # Automatically discover local IP to display to the user
@@ -522,6 +569,18 @@ if __name__ == "__main__":
 
     # Start UWB listener thread
     threading.Thread(target=_udp_uwb_listener, daemon=True).start()
+
+    # 启动时立即初始化 TTS 引擎。
+    # 缺库/后端不可用会在这里直接抛异常退出，而不是等到第一次 TTS 请求才崩。
+    log.info(f"Initializing TTS engine (backend={args.tts_backend})...")
+    try:
+        eng = get_tts_engine(backend=args.tts_backend)
+        log.info(f"TTS engine ready: backend={eng.backend_name}")
+    except Exception as e:
+        log.error("=" * 60)
+        log.error(f"TTS 引擎初始化失败，服务无法启动:\n{e}")
+        log.error("=" * 60)
+        raise
 
     log.info(f"Starting server at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

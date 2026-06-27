@@ -50,29 +50,63 @@ public:
   TArray<FName> DestinationTags;
 
   UPROPERTY(EditAnywhere, Category = "Navigation")
-  float DistanceScale = 3.0f;
+  float DistanceScale = 1.0f;
+
+  UPROPERTY(EditAnywhere, Category = "Navigation")
+  float ArrivalDistanceMeters = 0.4f;
+
+  UPROPERTY(EditAnywhere, Category = "Navigation")
+  float WaypointReachDistanceMeters = 0.8f;
+
+  UPROPERTY(EditAnywhere, Category = "Navigation")
+  float OffRouteAngleDegrees = 75.0f;
+
+  UPROPERTY(EditAnywhere, Category = "Navigation")
+  float OffRouteDistanceDeltaMeters = 0.75f;
 
   UPROPERTY(EditAnywhere, Category = "Navigation|Command")
   bool bShowDebugMessages = true;
 
 private:
   void RefreshDestinationMap();
+  void FinishNavigation(bool bSuccess);
+  float ComputePathDistanceMeters(const TArray<FVector> &PathPoints) const;
+  int32 FindCurrentSegmentIndex(const TArray<FVector> &PathPoints,
+                                const FVector &PlayerLoc) const;
+  float EstimatePromptDurationSeconds(const FString &Message) const;
+  void EnqueueHighPriorityPrompt(const FString &Message);
+  void EnqueueMediumPriorityPrompt(const FString &Message);
+  void UpdateRealtimePrompt(const FString &Message);
+  void ClearRealtimePrompt();
+  void ClearNonCriticalPrompts();
+  void ProcessPromptScheduler(float CurrentTime);
+  FString GetNextDebugPrompt() const;
+  void QueueOverviewFromPath(const TArray<FVector> &PathPoints,
+                             const FVector &CurrentForward,
+                             const FVector &CurrentRight);
 
   TMap<FName, FVector> DestinationMap;
   UNavigationSystemV1 *CachedNavSys = nullptr;
 
   FName ActiveTarget = NAME_None;
-  FVector ActiveTargetLocation;
+  FVector ActiveTargetLocation = FVector::ZeroVector;
   bool bIsNavigating = false;
+  bool bHasAnnouncedOverview = false;
+  bool bHasOffRouteWarning = false;
 
   FName LastNavTarget = NAME_None;
-  float LastSpokenAngle = 0.0f; // last spoken direction angle (degrees)
+  float LastSpokenAngle = 0.0f;
   float LastSpokenDistance = -1.0f;
   float LastTTSTime = 0.0f;
-  static constexpr float MinSpeakAngleDelta =
-      45.0f; // degrees threshold to re-speak direction
+  FVector LastPlayerLocation = FVector::ZeroVector;
+  float LastDistanceToWaypoint = -1.0f;
+  int32 LastProgressSegmentIndex = 0;
 
-  // Prompt throttling: buffer latest message, flush at most once per second
-  FString PendingNavPrompt;
-  float PromptSendTimer = 1.0f; // start ready so first message sends immediately
+  static constexpr float MinSpeakAngleDelta = 35.0f;
+
+  TArray<FString> HighPriorityPrompts;
+  TArray<FString> MediumPriorityPrompts;
+  FString CurrentRealtimePrompt;
+  bool bHasRealtimePromptPending = false;
+  float NextPromptDispatchTime = 0.0f;
 };

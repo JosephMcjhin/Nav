@@ -7,7 +7,8 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 numpy>=1.24.0
 
-# Cloud TTS and Audio processing
+# TTS and Audio processing
+# edge-tts: 云端流式 TTS 后端（微软 Azure 公开端点）
 edge-tts
 pydub
 audioop-lts

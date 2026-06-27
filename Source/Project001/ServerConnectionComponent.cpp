@@ -300,12 +300,13 @@ void UServerConnectionComponent::HandleJsonCommand(
         }
 
       } else if (MsgType == TEXT("set_rotation")) {
+        // IMU data drives ONLY the actor rotation (yaw).
         double Yaw = 0;
         JsonObject->TryGetNumberField(TEXT("yaw"), Yaw);
 
         if (UUWBTargetComponent *UWBComp =
                 Owner->FindComponentByClass<UUWBTargetComponent>()) {
-          UWBComp->SetUWBRotation(static_cast<float>(Yaw));
+          UWBComp->SetIMURotation(static_cast<float>(Yaw));
         }
 
         // Dispatch "navigate_to" to NavCommandComponent
@@ -314,11 +315,40 @@ void UServerConnectionComponent::HandleJsonCommand(
         if (!JsonObject->TryGetStringField(TEXT("destination"), DestString)) {
           JsonObject->TryGetStringField(TEXT("target"), DestString);
         }
+        UE_LOG(LogTemp, Log, TEXT("[ServerConnection] navigate_to received: %s"),
+               *DestString);
+        if (GEngine) {
+          GEngine->AddOnScreenDebugMessage(
+              9101, 4.0f, FColor::Cyan,
+              FString::Printf(TEXT("WS navigate_to: %s"), *DestString));
+        }
         if (!DestString.IsEmpty()) {
           if (UNavigationComponent *NavComp =
                   Owner->FindComponentByClass<UNavigationComponent>()) {
-            NavComp->NavigateTo(FName(*DestString));
+            const bool bStarted = NavComp->NavigateTo(FName(*DestString));
+            UE_LOG(LogTemp, Log,
+                   TEXT("[ServerConnection] NavigateTo(%s) => %s"),
+                   *DestString, bStarted ? TEXT("true") : TEXT("false"));
+            if (GEngine) {
+              GEngine->AddOnScreenDebugMessage(
+                  9102, 4.0f, bStarted ? FColor::Green : FColor::Red,
+                  FString::Printf(TEXT("NavigateTo(%s) => %s"), *DestString,
+                                  bStarted ? TEXT("OK") : TEXT("FAILED")));
+            }
+          } else {
+            UE_LOG(LogTemp, Warning,
+                   TEXT("[ServerConnection] NavigationComponent not found on owner: %s"),
+                   *Owner->GetName());
+            if (GEngine) {
+              GEngine->AddOnScreenDebugMessage(
+                  9102, 5.0f, FColor::Red,
+                  TEXT("navigate_to failed: NavigationComponent missing"));
+            }
           }
+        } else if (GEngine) {
+          GEngine->AddOnScreenDebugMessage(
+              9102, 5.0f, FColor::Red,
+              TEXT("navigate_to failed: empty destination"));
         }
       } else if (MsgType == TEXT("stop_navigation")) {
         if (UNavigationComponent *NavComp =
