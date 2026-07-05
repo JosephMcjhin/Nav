@@ -435,6 +435,14 @@ def ws_handler(ws):
                 else:
                     log_missing_glasses_once()
 
+            elif msg_type == "nav_beep":
+                # 蜂鸣引导：直接从 UE 转发到眼镜端
+                target_ws = glasses_client_ws or nav_request_client_ws
+                if target_ws in active_ws:
+                    send_json(target_ws, msg)
+                else:
+                    log_missing_glasses_once()
+
             # ── Calibration via WebSocket (代替 HTTP) ──────────────────────
             elif msg_type == "calibrate_point":
                 ue_x = float(msg.get("x", 0))
