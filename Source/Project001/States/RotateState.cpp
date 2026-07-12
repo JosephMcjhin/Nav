@@ -6,9 +6,6 @@ namespace {
 FString BuildTurnPrompt(float SignedAngleDegrees) {
   const float AbsDeg = FMath::Abs(SignedAngleDegrees);
   const int32 IntDeg = FMath::RoundToInt(AbsDeg);
-  if (AbsDeg < 8.0f) {
-    return UTF8_TO_TCHAR(u8"已经对准，请直走");
-  }
   const FString Dir = (SignedAngleDegrees >= 0.0f) ? UTF8_TO_TCHAR(u8"右")
                                                    : UTF8_TO_TCHAR(u8"左");
   return FString::Printf(TEXT("%s%s%d%s"), UTF8_TO_TCHAR(u8"请向"), *Dir,
@@ -18,9 +15,8 @@ FString BuildTurnPrompt(float SignedAngleDegrees) {
 
 void FRotateState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   Nav.StopBeep();
-  Nav.bBeepActive = false;
+  
   bBeepStarted = false;
-
   // 起始快照
   Ctx.StartLocation = Ctx.PlayerLoc;
 
@@ -31,20 +27,16 @@ void FRotateState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   LastRepromptTime = Ctx.CurrentTime;
   LastAnnouncedAngle = 999.0f;
 
-  // TTS 转向提示
-  FString Prompt = BuildTurnPrompt(Ctx.AngleError);
-  Nav.EnqueueHighPriorityPrompt(Prompt);
+  // TTS 转向提示（已对准则跳过）
+  if (FMath::Abs(Ctx.AngleError) >= Nav.AlignToleranceDegrees) {
+    Nav.EnqueuePrompt(BuildTurnPrompt(Ctx.AngleError));
+  }
 }
 
-ENavState FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
+void FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
   const float AbsErr = FMath::Abs(Ctx.AngleError);
 
-  // 转移：对准了 → Move
-  if (AbsErr < Nav.AlignToleranceDegrees) {
-    return ENavState::Move;
-  }
-
-  // 卡住检测
+  // 静止检测
   const bool bMoving = FMath::Abs(FMath::FindDeltaAngleDegrees(
       LastHeadingDegrees, Ctx.AngleError)) > 3.0f;
   if (bMoving) {
@@ -56,7 +48,10 @@ ENavState FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
   if (bIdle && (Ctx.CurrentTime - LastRepromptTime >
                 Nav.AlignIdleRepromptSeconds)) {
     LastRepromptTime = Ctx.CurrentTime;
-    Nav.EnqueueMediumPriorityPrompt(BuildTurnPrompt(Ctx.AngleError));
+    // 已对准时不重复提示
+    if (AbsErr >= Nav.AlignToleranceDegrees) {
+      Nav.EnqueuePrompt(BuildTurnPrompt(Ctx.AngleError));
+    }
   }
 
   // 蜂鸣：用户开始转之后才响，一旦启动就不再停止。
@@ -68,25 +63,42 @@ ENavState FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
     }
     if (bBeepStarted) {
       const float Progress = FMath::Clamp(1.0f - (AbsErr / 90.0f), 0.0f, 1.0f);
-      const int32 FreqHz = FMath::RoundToInt(400.0f + 800.0f * Progress);
-      Nav.SendBeepCommand(true, FreqHz);
+      // 非线性频率曲线：用平方（Progress²）让"接近对准时频率变化更快"。
+      // 远端（Progress≈0）频率几乎不变；近端（Progress→1）快速逼近上限。
+      // 范围仍是 280-560Hz，听感舒缓。
+      const int32 FreqHz = FMath::RoundToInt(280.0f + 280.0f * Progress * Progress);
+      // 立体声 pan：AngleError>0 表示目标在右侧（需右转）→ 偏右声道
+      // |AngleError| 最大映射到 0.7（保留一些居中感，避免完全偏到一边）
+      const float Pan = FMath::Clamp(Ctx.AngleError / 60.0f, -0.7f, 0.7f);
+      // 越接近对准，音量越低（避免快到位时还吵）
+      const float Volume = FMath::Clamp(0.4f + 0.6f * (1.0f - Progress), 0.4f, 1.0f);
+      // 蜂鸣间隔随 Progress 动态缩短（越对准更新越频繁）
+      Nav.BeepUpdateIntervalSeconds =
+          FMath::Lerp(1.0f, 0.2f, Progress * Progress);
+      Nav.SendBeepCommand(true, FreqHz, Pan, Volume);
     }
   }
 
-  // 接近提示：角度跨过阈值时播报
+  // 接近提示：仅当角度收窄（接近对准）跨过阈值时播报
   {
     const float Thresholds[] = {30.0f, 10.0f};
     for (float T : Thresholds) {
-      if (AbsErr <= T && LastAnnouncedAngle > T) {
-        LastAnnouncedAngle = T;
-        Nav.EnqueueMediumPriorityPrompt(
-            FString::Printf(TEXT("%d%s"),
-                            FMath::RoundToInt(AbsErr),
+      if (AbsErr <= T && PrevAbsError > T) {
+        Nav.EnqueuePrompt(
+            FString::Printf(TEXT("%.0f%s"), T,
                             UTF8_TO_TCHAR(u8"度")));
         break;
       }
     }
   }
 
-  return ENavState::Rotate;  // 保持自己
+  PrevAbsError = AbsErr;
+
+    // 返回值被忽略，仅为满足基类接口
+}
+
+void FRotateState::OnExit(UNavigationComponent& Nav, FNavContext& Ctx) {
+  // 离开 Rotate 时停蜂鸣、清掉之前的提示、发校准成功
+  Nav.StopBeep();
+  Nav.EnqueuePrompt(UTF8_TO_TCHAR(u8"校准成功"));
 }

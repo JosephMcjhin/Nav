@@ -58,6 +58,11 @@ public:
   UPROPERTY(meta = (BindWidgetOptional))
   UButton *BtnClearCache;
 
+  // 远程导航参数配置：点击后通过 WS 向后端拉取 nav_config.json，
+  // 后端返回后由 UServerConnectionComponent 自动转发给 NavigationComponent::ApplyRemoteConfig
+  UPROPERTY(meta = (BindWidgetOptional))
+  UButton *BtnApplyServerConfig;
+
   // Status labels
   UPROPERTY(meta = (BindWidgetOptional))
   UTextBlock *TxtStatus;
@@ -88,6 +93,13 @@ public:
   /** Send /api/calibrate/solve to the server. */
   UFUNCTION(BlueprintCallable, Category = "Beacon Calibration")
   void SolveCalibration();
+
+  /**
+   * 通过 WebSocket 向后端请求当前 nav_config.json 配置。
+   * 后端响应后会经 ServerConnectionComponent 自动转发给 NavigationComponent::ApplyRemoteConfig。
+   */
+  UFUNCTION(BlueprintCallable, Category = "Remote Config")
+  void RequestServerConfig();
 
   /**
    * Move the owned character in 2D.
@@ -153,4 +165,10 @@ private:
 
   UFUNCTION()
   void OnClearCacheClicked();
+
+  UFUNCTION()
+  void OnApplyServerConfigClicked();
+
+  UFUNCTION()
+  void OnRemoteConfigApplied(bool bSuccess, int32 AppliedCount, const FString& Message);
 };

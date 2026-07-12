@@ -1,0 +1,31 @@
+{
+  "_comment": "远程导航参数配置。UE 客户端点击按钮后通过 WS 拉取本文件，并覆盖 UNavigationComponent 中对应的 UPROPERTY。键名必须与 UE 侧字段名一致，未提供/类型错误/缺字段均会被忽略并保留默认值。字段类型与含义见 _types；标注【高级设置】的字段通常无需频繁调整。",
+  "_types": {
+    "ArrivalDistanceMeters": "float, 到达终点的判定半径（米）",
+    "WaypointReachRadiusMeters": "float, 到达路点的判定半径（米）",
+    "AlignToleranceDegrees": "float, 朝向校准通过的角度阈值（度）",
+    "ExecuteDriftDegrees": "float, 朝向偏移多少度时从直行退回朝向校准（度）",
+
+
+    "AlignBeepStartDeltaDegrees": "【高级设置】float, 朝向校准：用户起始转身多少度后开始蜂鸣引导（度）",
+    "ExecuteBeepStartMeters": "【高级设置】float, EXECUTE：用户走出多远（米）后开始蜂鸣引导",
+    "AlignIdleRepromptSeconds": "【高级设置】float, 朝向长时间不变重新 TTS 提示间隔（秒）",
+    "PromptGapSeconds": "【高级设置】float, TTS 句子之间的间隔（秒）",
+    "RouteDeviationThresholdMeters": "【高级设置】float, 路线偏离判定阈值（米）",
+    "RouteReplanCheckIntervalSeconds": "【高级设置】float, 路线偏差检查间隔（秒）"
+  },
+
+  "ArrivalDistanceMeters": 0.2,
+  "WaypointReachRadiusMeters": 0.2,
+  "AlignToleranceDegrees": 5.0,
+  "ExecuteDriftDegrees": 15.0,
+
+
+  "AlignBeepStartDeltaDegrees": 5.0,
+  "ExecuteBeepStartMeters": 0.4,
+  "AlignIdleRepromptSeconds": 2.5,
+  "PromptGapSeconds": 0.2,
+  "RouteDeviationThresholdMeters": 2.0,
+  "RouteReplanCheckIntervalSeconds": 1.5
+}
+

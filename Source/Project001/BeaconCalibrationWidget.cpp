@@ -7,6 +7,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
+#include "NavigationComponent.h"
 
 void UBeaconCalibrationWidget::NativeConstruct() {
   Super::NativeConstruct();
@@ -41,6 +42,11 @@ void UBeaconCalibrationWidget::NativeConstruct() {
   if (BtnClearCache) {
     BtnClearCache->OnClicked.AddDynamic(
         this, &UBeaconCalibrationWidget::OnClearCacheClicked);
+  }
+
+  if (BtnApplyServerConfig) {
+    BtnApplyServerConfig->OnClicked.AddDynamic(
+        this, &UBeaconCalibrationWidget::OnApplyServerConfigClicked);
   }
 
   if (ConnComp) {
@@ -122,6 +128,31 @@ void UBeaconCalibrationWidget::SolveCalibration() {
 
   SetStatus(TEXT("Calculating beacon positions..."));
   ConnComp->SendString(TEXT("{\"type\":\"calibrate_solve\"}"));
+}
+
+void UBeaconCalibrationWidget::RequestServerConfig() {
+  if (!ConnComp) {
+    SetStatus(TEXT("Error: ConnectionComponent not bound"));
+    return;
+  }
+  if (!ConnComp->IsConnected()) {
+    SetStatus(TEXT("Not connected to server"));
+    return;
+  }
+
+  // 绑定 NavigationComponent 的应用结果回调（只绑定一次）
+  if (AActor *Owner = ConnComp->GetOwner()) {
+    if (UNavigationComponent *NavComp =
+            Owner->FindComponentByClass<UNavigationComponent>()) {
+      NavComp->OnRemoteConfigApplied.AddUniqueDynamic(
+          this, &UBeaconCalibrationWidget::OnRemoteConfigApplied);
+    }
+  }
+
+  SetStatus(TEXT("Requesting remote config..."));
+  // 发送 WS 请求，后端会回复 {"type":"nav_config","config":{...}}}
+  // 该回复由 UServerConnectionComponent 自动转给 ApplyRemoteConfig
+  ConnComp->SendString(TEXT("{\"type\":\"get_nav_config\"}"));
 }
 
 void UBeaconCalibrationWidget::JoystickInput(float AxisX, float AxisY) {
@@ -328,4 +359,16 @@ void UBeaconCalibrationWidget::OnClearCacheClicked() {
 
   ConnComp->SendString(TEXT("{\"type\":\"calibrate_clear\"}"));
   SetStatus(TEXT("Clearing calibration cache..."));
+}
+
+void UBeaconCalibrationWidget::OnApplyServerConfigClicked() {
+  RequestServerConfig();
+}
+
+void UBeaconCalibrationWidget::OnRemoteConfigApplied(
+    bool bSuccess, int32 AppliedCount, const FString &Message) {
+  SetStatus(FString::Printf(
+      TEXT("%s: %s (%d fields)"),
+      bSuccess ? TEXT("Config applied") : TEXT("Config failed"),
+      *Message, AppliedCount));
 }

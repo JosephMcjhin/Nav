@@ -4,29 +4,33 @@
 
 void FMoveState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   Nav.StopBeep();
-  Nav.bBeepActive = false;
+  
 
   Ctx.StartLocation = Ctx.PlayerLoc;
 
   LastMoveSampleTime = Ctx.CurrentTime;
   LastTraveledMeters = 0.0f;
   LastRepromptTime = Ctx.CurrentTime;
-  DistLastAnnounced = 999.0f;
 
   // TTS 距离提示
   FString Prompt = FString::Printf(TEXT("%s%.1f%s"),
                                     UTF8_TO_TCHAR(u8"请直走约"),
                                     Ctx.RemainingMeters,
                                     UTF8_TO_TCHAR(u8"米"));
-  Nav.EnqueueHighPriorityPrompt(Prompt);
+  Nav.EnqueuePrompt(Prompt);
 }
 
-ENavState FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
+void FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
+  // 注：状态转移（含偏移过多切回 Rotate）由
+  // FNavStateMachine::EvaluateState 统一管理，此处 Tick 的返回值会被忽略。
+
   const float AbsErr = FMath::Abs(Ctx.AngleError);
 
-  // 转移：偏太多 → 回 Rotate
+  // 偏移过多：EvaluateState 会把状态切回 Rotate，此处补一句语音提示。
   if (AbsErr > Nav.ExecuteDriftDegrees) {
-    return ENavState::Rotate;
+    Nav.EnqueuePrompt(
+        UTF8_TO_TCHAR(u8"偏移太多，重新回到校准状态"));
+      // 返回值被忽略，仅为满足基类接口
   }
 
   const float Traveled = FVector::Dist2D(Ctx.PlayerLoc, Ctx.StartLocation) /
@@ -38,10 +42,23 @@ ENavState FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
         FMath::Max(Traveled + Ctx.RemainingMeters, KINDA_SMALL_NUMBER);
     const float Progress =
         FMath::Clamp(1.0f - (Ctx.RemainingMeters / Total), 0.0f, 1.0f);
-    const int32 FreqHz = FMath::RoundToInt(400.0f + 800.0f * Progress);
-    Nav.SendBeepCommand(true, FreqHz);
+    // 频率范围降到 280-560Hz（原 400-1200Hz 过尖刺耳）
+    const int32 FreqHz = FMath::RoundToInt(280.0f + 280.0f * Progress * Progress);
+    // 立体声 pan：计算下一路点在玩家"右"方向上的投影
+    // 投影 > 0 → 路点偏右 → 蜂鸣偏右声道；< 0 → 偏左
+    const float RightProj =
+        FVector::DotProduct(Ctx.PlayerRight.GetSafeNormal2D(),
+                            Ctx.SegmentDir.GetSafeNormal2D());
+    const float Pan = FMath::Clamp(RightProj * 0.7f, -0.7f, 0.7f);
+    // 音量与频率共用同一个 Progress（越接近目标越响）：
+    //   Progress 0 → 0.3（刚走出 ExecuteBeepStartMeters，轻声）
+    //   Progress 1 → 1.0（即将到达，满音量）
+    const float Volume = 0.3f + 0.7f * Progress;
+    Nav.BeepUpdateIntervalSeconds =
+        FMath::Lerp(1.0f, 0.2f, Progress * Progress);
+    Nav.SendBeepCommand(true, FreqHz, Pan, Volume);
   } else {
-    if (Nav.bBeepActive) Nav.StopBeep();
+    Nav.StopBeep();
   }
 
   // 静止检测
@@ -56,25 +73,25 @@ ENavState FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
   if (bIdle && (Ctx.CurrentTime - LastRepromptTime >
                 Nav.AlignIdleRepromptSeconds)) {
     LastRepromptTime = Ctx.CurrentTime;
-    Nav.EnqueueMediumPriorityPrompt(
+    Nav.EnqueuePrompt(
         FString::Printf(TEXT("%s%.1f%s"), UTF8_TO_TCHAR(u8"请直走约"),
                         Ctx.RemainingMeters, UTF8_TO_TCHAR(u8"米")));
   }
 
-  // 接近提示：距离跨过阈值时播报
+  // 接近提示：仅当距离收窄跨过阈值时播报
   {
     const float Thresholds[] = {2.0f, 1.0f, 0.5f};
     for (float T : Thresholds) {
-      if (Ctx.RemainingMeters <= T && DistLastAnnounced > T) {
-        DistLastAnnounced = T;
-        Nav.EnqueueMediumPriorityPrompt(
-            FString::Printf(TEXT("%.1f%s"),
-                            Ctx.RemainingMeters,
+      if (Ctx.RemainingMeters <= T && PrevRemainingMeters > T) {
+        Nav.EnqueuePrompt(
+            FString::Printf(TEXT("%.1f%s"), T,
                             UTF8_TO_TCHAR(u8"米")));
         break;
       }
     }
   }
 
-  return ENavState::Move;  // 保持自己
+  PrevRemainingMeters = Ctx.RemainingMeters;
+
+    // 保持自己
 }

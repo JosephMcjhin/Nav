@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "LocalBeepPlayer.h"
 #include "NavigationComponent.h"
 #include "Modules/ModuleManager.h"
 
@@ -136,6 +137,38 @@ bool IsLocalNavTTSEnabled() { return GLocalNavTTSEnabled; }
 
 void SetLocalNavTTSEnabled(bool bEnabled) { GLocalNavTTSEnabled = bEnabled; }
 
+const FString &GetBuildTimestamp() {
+  // __DATE__ 格式："Mmm dd yyyy"（如 "Jul 11 2026"，日 < 10 时前导是空格）
+  // __TIME__ 格式："HH:MM:SS"
+  // 这里只在第一次调用时解析一次，之后直接返回缓存引用。
+  static const FString Cached = []() -> FString {
+    const FString DateStr(__DATE__);  // "Mmm dd yyyy"
+    const FString TimeStr(__TIME__);  // "HH:MM:SS"
+
+    // 月份缩写 → 数字
+    static const TMap<FString, FString> MonthMap = {
+        {TEXT("Jan"), TEXT("01")}, {TEXT("Feb"), TEXT("02")},
+        {TEXT("Mar"), TEXT("03")}, {TEXT("Apr"), TEXT("04")},
+        {TEXT("May"), TEXT("05")}, {TEXT("Jun"), TEXT("06")},
+        {TEXT("Jul"), TEXT("07")}, {TEXT("Aug"), TEXT("08")},
+        {TEXT("Sep"), TEXT("09")}, {TEXT("Oct"), TEXT("10")},
+        {TEXT("Nov"), TEXT("11")}, {TEXT("Dec"), TEXT("12")},
+    };
+
+    const FString MonthAbbr = DateStr.Left(3);
+    const FString MonthNum = MonthMap.Contains(MonthAbbr) ? MonthMap[MonthAbbr]
+                                                          : TEXT("??");
+    // 日期：去前导空格，补 0
+    FString DayStr = DateStr.Mid(4, 2).TrimStartAndEnd();
+    if (DayStr.Len() == 1) DayStr = TEXT("0") + DayStr;
+    const FString YearStr = DateStr.Right(4);
+
+    return FString::Printf(TEXT("%s-%s-%s %s"),
+                           *YearStr, *MonthNum, *DayStr, *TimeStr);
+  }();
+  return Cached;
+}
+
 void SpeakLocalNavText(const FString &Text) {
   if (!GLocalNavTTSEnabled || Text.IsEmpty()) {
     return;
@@ -160,5 +193,12 @@ void SpeakLocalNavText(const FString &Text) {
 #else
   UE_LOG(LogTemp, Warning, TEXT("Local nav TTS unsupported on this platform."));
 #endif
+}
+
+void PlayLocalBeep(bool bActive, int32 FreqHz, float Pan, float Volume,
+                   float IntervalMs) {
+  // 委托给 FLocalBeepPlayer 单例（见 LocalBeepPlayer.h/.cpp）。
+  // 非 Windows 平台为空操作（见 LocalBeepPlayer.cpp）。
+  FLocalBeepPlayer::Get().SetActive(bActive, FreqHz, Pan, Volume, IntervalMs);
 }
 } // namespace Project001Console

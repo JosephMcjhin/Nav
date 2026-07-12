@@ -12,6 +12,14 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNavigationStarted, FName,
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNavigationArrived, FName,
                                              DestinationTag, bool, bSuccess);
 
+// 远程导航参数配置应用结果
+// - bSuccess：是否成功解析并应用
+// - AppliedCount：本次成功覆盖的字段数量（缺字段/类型错误的不计）
+// - Message：人类可读结果描述（供 UI 显示）
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+    FOnRemoteConfigApplied, bool, bSuccess, int32, AppliedCount,
+    const FString&, Message);
+
 class UNavigationSystemV1;
 
 UCLASS(ClassGroup = (Navigation), meta = (BlueprintSpawnableComponent))
@@ -41,11 +49,31 @@ public:
   UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
   FName GetCurrentTarget() const { return ActiveTarget; }
 
+  /**
+   * 从后端 nav_config.json 拉取的 JSON 字符串中应用导航参数配置。
+   *
+   * @param JsonString 后端返回的 JSON，期望格式：
+   *        {"type":"nav_config","status":"ok","config":{
+   *            "DistanceScale": 1.0,
+   *            "ArrivalDistanceMeters": 0.2,
+   *            ...
+   *        }}}
+   *        或直接 {"DistanceScale": 1.0, ...}
+   *        未提供/类型错误的字段会被静默忽略并保留当前值。
+   * @return 是否成功解析（至少应用 1 个字段才返回 true）。
+   */
+  UFUNCTION(BlueprintCallable, Category = "Navigation|RemoteConfig")
+  bool ApplyRemoteConfig(const FString &JsonString);
+
   UPROPERTY(BlueprintAssignable, Category = "Navigation|Command")
   FOnNavigationStarted OnNavigationStarted;
 
   UPROPERTY(BlueprintAssignable, Category = "Navigation|Command")
   FOnNavigationArrived OnNavigationArrived;
+
+  // 远程导航参数配置应用结果（成功/失败都会触发）
+  UPROPERTY(BlueprintAssignable, Category = "Navigation|RemoteConfig")
+  FOnRemoteConfigApplied OnRemoteConfigApplied;
 
   UPROPERTY(EditAnywhere, Category = "Navigation")
   TArray<FName> DestinationTags;
@@ -63,7 +91,7 @@ public:
 
   // 朝向校准通过的角度阈值（|angle error| < 此值视为已对准，进入 EXECUTE）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float AlignToleranceDegrees = 5.0f;
+  float AlignToleranceDegrees = 10.0f;
 
   // EXECUTE：用户走出多远（米）后开始蜂鸣引导。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
@@ -71,15 +99,15 @@ public:
 
   // EXECUTE：朝向偏移多少度时退回 ALIGN 状态。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float ExecuteDriftDegrees = 30.0f;
+  float ExecuteDriftDegrees = 15.0f;
 
   // 朝向长时间不变（度）超过该阈值视为“卡住”，重新 TTS 提示一次（秒）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
   float AlignIdleRepromptSeconds = 2.5f;
 
-  // 蜂鸣更新节流（秒）。
+  // 蜂鸣更新节流（秒）。Move 状态会根据 Progress 动态缩短。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float BeepUpdateIntervalSeconds = 0.15f;
+  float BeepUpdateIntervalSeconds = 1.0f;
 
   // TTS 句子之间的间隔（秒）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
@@ -111,7 +139,6 @@ public:
   friend class FPlanState;
   friend class FRotateState;
   friend class FMoveState;
-  friend class FWaitState;
   friend class FNavStateMachine;
 
 private:
@@ -121,15 +148,15 @@ private:
   float ComputePathDistanceMeters(const TArray<FVector> &PathPoints) const;
 
   // TTS 队列
-  void EnqueueHighPriorityPrompt(const FString &Message);
-  void EnqueueMediumPriorityPrompt(const FString &Message);
+  void EnqueuePrompt(const FString &Message, bool bInsertFirst = false);
   void ClearNonCriticalPrompts();
   void ProcessPromptScheduler(float CurrentTime);
 
   // 蜂鸣
-  void SendBeepCommand(bool bActive, int32 FreqHz);
+  // Pan: -1=全左, 0=居中, +1=全右。Volume: 0..1 总音量缩放。
+  void SendBeepCommand(bool bActive, int32 FreqHz, float Pan = 0.0f, float Volume = 1.0f);
   void StopBeep();
-  void PlayLocalBeep(int32 FreqHz);
+  void PlayLocalBeep(bool bActive, int32 FreqHz, float Pan, float Volume, float IntervalMs);
 
   // 调试
   void HandleDebugKeyboardInput(AActor *Owner, float DeltaTime);
@@ -140,7 +167,6 @@ private:
   int32 CurrentWaypointIndex = -1;  // 下一个要去的路点索引（-1 未规划，0 是起点）
   TArray<FVector> PlannedWaypoints;
   float LastReplanCheckTime = 0.0f;
-  bool bBeepActive = false;
   float LastBeepSendTime = 0.0f;
 
   // 导航目标
@@ -151,8 +177,7 @@ private:
   bool bIsNavigating = false;
 
   // TTS 队列
-  TArray<FString> HighPriorityPrompts;
-  TArray<FString> MediumPriorityPrompts;
+  TArray<FString> PendingPrompts;
   FString CurrentRealtimePrompt;
   bool bHasRealtimePromptPending = false;
   float NextPromptDispatchTime = 0.0f;

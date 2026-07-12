@@ -3,12 +3,10 @@
 #include "States/PlanState.h"
 #include "States/RotateState.h"
 #include "States/MoveState.h"
-#include "States/WaitState.h"
 #include "NavigationComponent.h"
 
 FNavStateMachine::FNavStateMachine() {
   States[static_cast<uint8>(ENavState::None)] = nullptr;
-  States[static_cast<uint8>(ENavState::Wait)] = MakeUnique<FWaitState>();
   States[static_cast<uint8>(ENavState::Plan)] = MakeUnique<FPlanState>();
   States[static_cast<uint8>(ENavState::Rotate)] = MakeUnique<FRotateState>();
   States[static_cast<uint8>(ENavState::Move)] = MakeUnique<FMoveState>();
@@ -16,7 +14,6 @@ FNavStateMachine::FNavStateMachine() {
 
 void FNavStateMachine::Reset() {
   CurrentState = ENavState::None;
-  LastNonWaitState = ENavState::None;
   LastWaypointIndex = -2;
 }
 
@@ -44,19 +41,6 @@ void FNavStateMachine::SwitchTo(ENavState NewState, UNavigationComponent& Nav,
 
 ENavState FNavStateMachine::EvaluateState(UNavigationComponent& Nav,
                                           FNavContext& Ctx) {
-  // TTS 播放中 → Wait（不修改 LastNonWaitState 之外的任何状态）
-  if (Ctx.CurrentTime < Nav.NextPromptDispatchTime) {
-    if (CurrentState != ENavState::Wait) {
-      LastNonWaitState = CurrentState;
-    }
-    return ENavState::Wait;
-  }
-
-  // 从 Wait 恢复时，回到上一个真实状态
-  if (CurrentState == ENavState::Wait) {
-    CurrentState = LastNonWaitState;
-  }
-
   // 路点变化 → Plan
   if (Nav.CurrentWaypointIndex != LastWaypointIndex) {
     LastWaypointIndex = Nav.CurrentWaypointIndex;
@@ -68,17 +52,25 @@ ENavState FNavStateMachine::EvaluateState(UNavigationComponent& Nav,
     return ENavState::None;
   }
 
-  // 方向判断：Rotate ↔ Move（迟滞）
+  // 方向判断：Rotate ↔ Move
   const float AbsErr = FMath::Abs(Ctx.AngleError);
   if (CurrentState == ENavState::Rotate) {
     return AbsErr < Nav.AlignToleranceDegrees ? ENavState::Move
                                               : ENavState::Rotate;
   }
-  return AbsErr > Nav.ExecuteDriftDegrees ? ENavState::Rotate
-                                          : ENavState::Move;
+  // Move 状态：偏移过多 → Rotate
+  if (AbsErr > Nav.ExecuteDriftDegrees) {
+    return ENavState::Rotate;
+  }
+  return ENavState::Move;
 }
 
 void FNavStateMachine::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
+  // TTS 播放中 → 等待播完再评估
+  if (Ctx.CurrentTime < Nav.NextPromptDispatchTime) {
+    return;
+  }
+
   // 计算段信息
   if (Nav.CurrentWaypointIndex >= 0 && Nav.PlannedWaypoints.Num() >= 2) {
     const FVector NextWaypoint =
@@ -94,15 +86,13 @@ void FNavStateMachine::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
 
   ENavState Desired = EvaluateState(Nav, Ctx);
 
-  // Wait 是透明层，不走 OnExit/OnEnter
-  if (Desired == ENavState::Wait) return;
+  // 先 Tick 当前状态（让其有机会执行校准成功等效果），再切状态
+  if (CurrentState != ENavState::None) {
+    auto* S = States[static_cast<uint8>(CurrentState)].Get();
+    if (S) S->Tick(Nav, Ctx);
+  }
 
   if (Desired != CurrentState) {
     SwitchTo(Desired, Nav, Ctx);
   }
-
-  if (CurrentState == ENavState::None) return;
-
-  auto* S = States[static_cast<uint8>(CurrentState)].Get();
-  if (S) S->Tick(Nav, Ctx);
 }

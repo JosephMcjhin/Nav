@@ -88,6 +88,8 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
     Self->bIsDisconnecting = false;
     Self->ConnectedURL = InServerURL;
     Self->SendString(TEXT("{\"type\":\"register\",\"role\":\"ue\"}"));
+    // 连接后自动拉取远程导航参数配置（nav_config.json）
+    Self->SendString(TEXT("{\"type\":\"get_nav_config\"}"));
     if (GEngine)
       GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Green,
                                        TEXT("Connected to Python Server."));
@@ -354,6 +356,32 @@ void UServerConnectionComponent::HandleJsonCommand(
         if (UNavigationComponent *NavComp =
                 Owner->FindComponentByClass<UNavigationComponent>()) {
           NavComp->StopNavigation();
+        }
+      } else if (MsgType == TEXT("nav_config") ||
+                 MsgType == TEXT("nav_config_result")) {
+        // ── 远程导航参数配置：后端下发 nav_config.json 的内容 ───────
+        // payload 形如 {"type":"nav_config","status":"ok","config":{...}}}
+        // 或失败响应 {"type":"nav_config_result","status":"error","message":...}
+        if (UNavigationComponent *NavComp =
+                Owner->FindComponentByClass<UNavigationComponent>()) {
+          const bool bApplied = NavComp->ApplyRemoteConfig(MessageString);
+          UE_LOG(LogTemp, Log,
+                 TEXT("[ServerConnection] nav_config applied=%s"), bApplied ? TEXT("true") : TEXT("false"));
+          if (GEngine) {
+            GEngine->AddOnScreenDebugMessage(
+                9201, 4.0f,
+                bApplied ? FColor::Green : FColor::Red,
+                FString::Printf(TEXT("[RemoteConfig] applied=%s"),
+                                bApplied ? TEXT("OK") : TEXT("FAILED")));
+          }
+        } else {
+          UE_LOG(LogTemp, Warning,
+                 TEXT("[ServerConnection] nav_config received but NavigationComponent missing"));
+          if (GEngine) {
+            GEngine->AddOnScreenDebugMessage(
+                9202, 5.0f, FColor::Red,
+                TEXT("nav_config failed: NavigationComponent missing"));
+          }
         }
       }
     }

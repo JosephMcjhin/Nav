@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 import base64
+import os
 
 import numpy as np
 from flask import Flask, jsonify, request
@@ -244,8 +245,6 @@ def stop_navigation():
     return jsonify({"status": "ok", "ue_connected": ue_client_ws is not None})
 
 
-
-
 @app.route("/api/calibrate/heading", methods=["POST"])
 def calibrate_heading():
     """
@@ -327,6 +326,57 @@ def broadcast_status():
         "imu_offset": imu_offset,
         "points": valid_count
     })
+
+
+
+
+
+# ── 远程导航参数配置 ───────────────────────────────────────────────────────────
+# 路径：与 web_app.py 同目录下的 nav_config.json。每次拉取都重新读取，
+# 这样运维可以直接改 JSON 无需重启服务。
+NAV_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "nav_config.json")
+_nav_config_mtime = 0.0          # 上次成功加载时的 mtime，用于增量缓存
+_nav_config_cache = None         # 上次成功加载的内容
+
+
+def _load_nav_config_payload():
+    """读取 nav_config.json 并返回一个清理过的 dict（只含可下发字段）。
+
+    返回 None 表示文件不存在或解析失败。
+    缓存策略：仅当文件 mtime 变化时才重新解析；这样高频拉取不会有 IO 开销。
+    """
+    global _nav_config_mtime, _nav_config_cache
+
+    if not os.path.isfile(NAV_CONFIG_PATH):
+        log.warning(f"[nav_config] file not found: {NAV_CONFIG_PATH}")
+        return None
+
+    try:
+        mtime = os.path.getmtime(NAV_CONFIG_PATH)
+    except OSError:
+        return None
+
+    if _nav_config_cache is not None and mtime == _nav_config_mtime:
+        return _nav_config_cache
+
+    try:
+        with open(NAV_CONFIG_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        log.error(f"[nav_config] failed to load: {e}")
+        return None
+
+    if not isinstance(raw, dict):
+        log.error("[nav_config] root is not a JSON object")
+        return None
+
+    # 剥离注释字段（下划线开头的元信息，例如 _comment / _types）
+    payload = {k: v for k, v in raw.items() if not str(k).startswith("_")}
+    _nav_config_cache = payload
+    _nav_config_mtime = mtime
+    log.info(f"[nav_config] loaded {len(payload)} keys from {NAV_CONFIG_PATH}")
+    return payload
 
 
 @app.route("/api/calibrate/clear", methods=["POST"])
@@ -484,6 +534,28 @@ def ws_handler(ws):
                 broadcast_status()
                 log.info("Calibration cleared via WebSocket.")
                 send_json(ws, {"type": "calibrate_clear_result", "status": "ok"})
+
+            # ── 远程导航参数配置（UE 客户端拉取 nav_config.json） ─────────
+            elif msg_type == "get_nav_config":
+                config_payload = _load_nav_config_payload()
+                if config_payload is None:
+                    send_json(ws, {
+                        "type": "nav_config_result",
+                        "status": "error",
+                        "message": "nav_config.json missing or invalid"
+                    })
+                else:
+                    # 注意：原样回传 config 对象，键名需与 UE 侧 UPROPERTY 一致
+                    send_json(ws, {
+                        "type": "nav_config",
+                        "status": "ok",
+                        "config": config_payload
+                    })
+                    log.info(
+                        f"nav_config sent to {client_ip}: "
+                        f"{len(config_payload)} keys"
+                    )
+
 
 
     except Exception as e:

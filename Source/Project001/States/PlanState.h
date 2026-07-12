@@ -10,6 +10,6 @@
 class FPlanState : public FNavState {
  public:
   void OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) override;
-  ENavState Tick(UNavigationComponent& Nav, FNavContext& Ctx) override;
+  void Tick(UNavigationComponent& Nav, FNavContext& Ctx) override;
   FName GetName() const override { return FName(TEXT("PLAN")); }
 };

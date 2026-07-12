@@ -24,10 +24,9 @@ struct FNavContext {
 // 状态标识
 enum class ENavState : uint8 {
   None = 0,
-  Wait = 1,
-  Plan = 2,
-  Rotate = 3,
-  Move = 4,
+  Plan = 1,
+  Rotate = 2,
+  Move = 3,
 };
 
 // 状态基类
@@ -36,7 +35,7 @@ class FNavState {
   virtual ~FNavState() = default;
   virtual void OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {}
   // 返回下一帧应处于的状态。返回自己表示保持。
-  virtual ENavState Tick(UNavigationComponent& Nav, FNavContext& Ctx) = 0;
+  virtual void Tick(UNavigationComponent& Nav, FNavContext& Ctx) {}
   virtual void OnExit(UNavigationComponent& Nav, FNavContext& Ctx) {}
   virtual FName GetName() const = 0;
 };
@@ -59,7 +58,6 @@ class FNavStateMachine {
   void SwitchTo(ENavState NewState, UNavigationComponent& Nav, FNavContext& Ctx);
 
   ENavState CurrentState = ENavState::None;
-  ENavState LastNonWaitState = ENavState::None;
   int32 LastWaypointIndex = -2;
-  TUniquePtr<FNavState> States[5];
+  TUniquePtr<FNavState> States[4];
 };
