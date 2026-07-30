@@ -15,6 +15,7 @@ FString BuildTurnPrompt(float SignedAngleDegrees) {
 
 void FRotateState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   Nav.StopBeep();
+  Nav.StopDrip();
   
   bBeepStarted = false;
   // 起始快照
@@ -61,21 +62,23 @@ void FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
     if (!bBeepStarted) {
       bBeepStarted = (TurnedFromStart >= Nav.AlignBeepStartDeltaDegrees);
     }
-    if (bBeepStarted) {
+    if (bBeepStarted && Nav.SoundComp) {
       const float Progress = FMath::Clamp(1.0f - (AbsErr / 90.0f), 0.0f, 1.0f);
-      // 非线性频率曲线：用平方（Progress²）让"接近对准时频率变化更快"。
-      // 远端（Progress≈0）频率几乎不变；近端（Progress→1）快速逼近上限。
-      // 范围仍是 280-560Hz，听感舒缓。
-      const int32 FreqHz = FMath::RoundToInt(280.0f + 280.0f * Progress * Progress);
-      // 立体声 pan：AngleError>0 表示目标在右侧（需右转）→ 偏右声道
-      // |AngleError| 最大映射到 0.7（保留一些居中感，避免完全偏到一边）
-      const float Pan = FMath::Clamp(Ctx.AngleError / 60.0f, -0.7f, 0.7f);
+      // 转向校准：高频警报（600-1000Hz），比前进蜂鸣更尖锐，便于区分。
+      const int32 FreqHz = FMath::RoundToInt(
+          Nav.SoundComp->RotateBeepBaseFreqHz +
+          Nav.SoundComp->RotateBeepFreqRangeHz * Progress * Progress);
+      // 立体声 pan：使用更强的声道分离度（RotatePanStrength，默认 1.0=全偏）
+      // AngleError>0 表示目标在右侧（需右转）→ 偏右声道
+      const float Pan = FMath::Clamp(
+          Ctx.AngleError / 60.0f * Nav.SoundComp->RotatePanStrength, -1.0f, 1.0f);
       // 越接近对准，音量越低（避免快到位时还吵）
       const float Volume = FMath::Clamp(0.4f + 0.6f * (1.0f - Progress), 0.4f, 1.0f);
       // 蜂鸣间隔随 Progress 动态缩短（越对准更新越频繁）
-      Nav.BeepUpdateIntervalSeconds =
+      Nav.SoundComp->BeepUpdateIntervalSeconds =
           FMath::Lerp(1.0f, 0.2f, Progress * Progress);
-      Nav.SendBeepCommand(true, FreqHz, Pan, Volume);
+      Nav.SendBeepCommand(true, FreqHz, Pan, Volume,
+                          ENavSoundCategory::Beep_TurnCalibrate);
     }
   }
 
@@ -98,7 +101,10 @@ void FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
 }
 
 void FRotateState::OnExit(UNavigationComponent& Nav, FNavContext& Ctx) {
-  // 离开 Rotate 时停蜂鸣、清掉之前的提示、发校准成功
+  // 离开 Rotate 时停所有连续引导音、清掉之前的提示、发校准成功
   Nav.StopBeep();
+  Nav.StopDrip();
+  Nav.ClearNonCriticalPrompts();
+  Nav.SendSoundEffect(ENavSoundCategory::SFX_WaypointReached);
   Nav.EnqueuePrompt(UTF8_TO_TCHAR(u8"校准成功"));
 }

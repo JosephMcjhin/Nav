@@ -7,6 +7,7 @@
 class FMoveState : public FNavState {
  public:
   void OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) override;
+  void OnExit(UNavigationComponent& Nav, FNavContext& Ctx) override;
   void Tick(UNavigationComponent& Nav, FNavContext& Ctx) override;
   FName GetName() const override { return FName(TEXT("MOVE")); }
 

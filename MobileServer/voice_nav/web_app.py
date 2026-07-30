@@ -455,11 +455,6 @@ def ws_handler(ws):
                         f"Navigation request target={cmd.get('target', '')} "
                         f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
                     )
-                    sent_to_ue = send_to_ue({"type": "navigate_to", "destination": cmd.get("target", "")})
-                    log.info(
-                        f"Navigation request target={cmd.get('target', '')} "
-                        f"sent_to_ue={sent_to_ue} active_clients={len(active_ws)}"
-                    )
                     send_json(ws, {"type": "status", "text": f"开始导航到: {cmd.get('target', '')}", "success": True})
                 else:
                     send_json(ws, {"type": "status", "text": "无法识别目标", "success": False})
@@ -485,8 +480,7 @@ def ws_handler(ws):
                 else:
                     log_missing_glasses_once()
 
-            elif msg_type == "nav_beep":
-                # 蜂鸣引导：直接从 UE 转发到眼镜端
+            elif msg_type in ("nav_beep", "nav_drip", "nav_sound"):
                 target_ws = glasses_client_ws or nav_request_client_ws
                 if target_ws in active_ws:
                     send_json(target_ws, msg)

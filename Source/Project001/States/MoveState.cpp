@@ -4,7 +4,7 @@
 
 void FMoveState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   Nav.StopBeep();
-  
+  Nav.StopDrip();
 
   Ctx.StartLocation = Ctx.PlayerLoc;
 
@@ -20,45 +20,37 @@ void FMoveState::OnEnter(UNavigationComponent& Nav, FNavContext& Ctx) {
   Nav.EnqueuePrompt(Prompt);
 }
 
+void FMoveState::OnExit(UNavigationComponent& Nav, FNavContext& Ctx) {
+  Nav.StopDrip();
+}
+
 void FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
   // 注：状态转移（含偏移过多切回 Rotate）由
   // FNavStateMachine::EvaluateState 统一管理，此处 Tick 的返回值会被忽略。
 
   const float AbsErr = FMath::Abs(Ctx.AngleError);
 
-  // 偏移过多：EvaluateState 会把状态切回 Rotate，此处补一句语音提示。
   if (AbsErr > Nav.ExecuteDriftDegrees) {
-    Nav.EnqueuePrompt(
-        UTF8_TO_TCHAR(u8"偏移太多，重新回到校准状态"));
-      // 返回值被忽略，仅为满足基类接口
+    Nav.ClearNonCriticalPrompts();
+    Nav.SendSoundEffect(ENavSoundCategory::SFX_Deviation);
   }
 
   const float Traveled = FVector::Dist2D(Ctx.PlayerLoc, Ctx.StartLocation) /
                          100.0f / Nav.DistanceScale;
 
-  // 蜂鸣：走出去才响。
+  // 水滴引导：用统一间隔（BeepUpdateIntervalSeconds），发送一次消息给客户端自行循环。
   if (Traveled >= Nav.ExecuteBeepStartMeters) {
     const float Total =
         FMath::Max(Traveled + Ctx.RemainingMeters, KINDA_SMALL_NUMBER);
     const float Progress =
         FMath::Clamp(1.0f - (Ctx.RemainingMeters / Total), 0.0f, 1.0f);
-    // 频率范围降到 280-560Hz（原 400-1200Hz 过尖刺耳）
-    const int32 FreqHz = FMath::RoundToInt(280.0f + 280.0f * Progress * Progress);
-    // 立体声 pan：计算下一路点在玩家"右"方向上的投影
-    // 投影 > 0 → 路点偏右 → 蜂鸣偏右声道；< 0 → 偏左
-    const float RightProj =
-        FVector::DotProduct(Ctx.PlayerRight.GetSafeNormal2D(),
-                            Ctx.SegmentDir.GetSafeNormal2D());
-    const float Pan = FMath::Clamp(RightProj * 0.7f, -0.7f, 0.7f);
-    // 音量与频率共用同一个 Progress（越接近目标越响）：
-    //   Progress 0 → 0.3（刚走出 ExecuteBeepStartMeters，轻声）
-    //   Progress 1 → 1.0（即将到达，满音量）
-    const float Volume = 0.3f + 0.7f * Progress;
-    Nav.BeepUpdateIntervalSeconds =
-        FMath::Lerp(1.0f, 0.2f, Progress * Progress);
-    Nav.SendBeepCommand(true, FreqHz, Pan, Volume);
-  } else {
-    Nav.StopBeep();
+    // 越接近目标，间隔越短（与 beep 统一公式）
+    if (Nav.SoundComp) {
+      Nav.SoundComp->BeepUpdateIntervalSeconds =
+          FMath::Lerp(1.0f, 0.2f, Progress * Progress);
+      Nav.SendDripCommand(true,
+                          Nav.SoundComp->BeepUpdateIntervalSeconds * 1000.0f);
+    }
   }
 
   // 静止检测

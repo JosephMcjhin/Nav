@@ -3,6 +3,7 @@
 #include "Components/ActorComponent.h"
 #include "CoreMinimal.h"
 #include "NavigationPath.h"
+#include "NavigationSoundPlayer.h"
 #include "NavigationStateMachine.h"
 
 #include "NavigationComponent.generated.h"
@@ -13,14 +14,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnNavigationArrived, FName,
                                              DestinationTag, bool, bSuccess);
 
 // 远程导航参数配置应用结果
-// - bSuccess：是否成功解析并应用
-// - AppliedCount：本次成功覆盖的字段数量（缺字段/类型错误的不计）
-// - Message：人类可读结果描述（供 UI 显示）
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
     FOnRemoteConfigApplied, bool, bSuccess, int32, AppliedCount,
     const FString&, Message);
 
 class UNavigationSystemV1;
+class UNavigationQueryFilter;
 
 UCLASS(ClassGroup = (Navigation), meta = (BlueprintSpawnableComponent))
 class PROJECT001_API UNavigationComponent : public UActorComponent {
@@ -31,6 +30,7 @@ public:
 
 protected:
   virtual void BeginPlay() override;
+  virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
   virtual void
@@ -43,11 +43,46 @@ public:
   UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
   void StopNavigation();
 
+  /** 手机端按钮调用：让角色原地转向指定角度（正=右转，负=左转）。 */
+  UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
+  void TurnPlayer(float Degrees);
+
+  /** 开始持续左/右转（按钮按住时调用）。 */
+  void StartTurnLeft() { bIsTurningLeft = true; }
+  void StopTurnLeft()  { bIsTurningLeft = false; }
+  void StartTurnRight(){ bIsTurningRight = true; }
+  void StopTurnRight() { bIsTurningRight = false; }
+
   UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
   TArray<FName> GetAvailableDestinations() const;
 
   UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
   FName GetCurrentTarget() const { return ActiveTarget; }
+
+  UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
+  bool IsNavigating() const { return bIsNavigating; }
+
+  /** 偏离后全局重新寻路，由 PlanState::OnEnter / Tick 调用。 */
+  void ReplanFromDeviation(const FNavContext& Ctx);
+
+  // ── 音效接口（委托给 UNavigationSoundComponent） ──────────────────
+  void SendSoundEffect(ENavSoundCategory Category) {
+    if (SoundComp) SoundComp->SendSoundEffect(Category);
+  }
+  void SendBeepCommand(bool bActive, int32 FreqHz, float Pan = 0.0f,
+                       float Volume = 1.0f,
+                       ENavSoundCategory BeepType = ENavSoundCategory::Beep_TurnCalibrate) {
+    if (SoundComp) SoundComp->SendBeepCommand(bActive, FreqHz, Pan, Volume, BeepType);
+  }
+  void StopBeep() { if (SoundComp) SoundComp->StopBeep(); }
+  void SendDripCommand(bool bActive, float IntervalMs) {
+    if (SoundComp) SoundComp->SendDripCommand(bActive, IntervalMs);
+  }
+  void StopDrip() { if (SoundComp) SoundComp->StopDrip(); }
+  void EnqueuePrompt(const FString& Message, bool bHighPriority = false) {
+    if (SoundComp) SoundComp->EnqueuePrompt(Message, bHighPriority);
+  }
+  void ClearNonCriticalPrompts() { if (SoundComp) SoundComp->ClearNonCriticalPrompts(); }
 
   /**
    * 从后端 nav_config.json 拉取的 JSON 字符串中应用导航参数配置。
@@ -105,14 +140,6 @@ public:
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
   float AlignIdleRepromptSeconds = 2.5f;
 
-  // 蜂鸣更新节流（秒）。Move 状态会根据 Progress 动态缩短。
-  UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float BeepUpdateIntervalSeconds = 1.0f;
-
-  // TTS 句子之间的间隔（秒）。
-  UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float PromptGapSeconds = 0.2f;
-
   // 路线规划：实时路径与固定路点的距离差超过此值 → 偏离，重新规划（米）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
   float RouteDeviationThresholdMeters = 2.0f;
@@ -125,6 +152,35 @@ public:
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
   float WaypointReachRadiusMeters = 0.2f;
 
+  // ── 目的地模式：true=直接用 Actor 中心；false=投影到碰撞体边缘 navmesh ──
+  UPROPERTY(EditAnywhere, Category = "Navigation|Destination")
+  bool bUseActorCenterAsDestination = true;
+
+  /** 目的地投影到 NavMesh 的搜索半径（厘米）。
+   *  NavModifierVolume 等会挖空内部 NavMesh，中心点不在 NavMesh 上，
+   *  需要投影到最近的 NavMesh 边缘。默认 1000cm 足够覆盖 20m 见方的 Volume。 */
+  UPROPERTY(EditAnywhere, Category = "Navigation|Destination")
+  float DestinationProjectionRadiusCm = 1000.0f;
+
+  /** 寻路过滤器（可选）。设置为道路偏好过滤器可让路线偏向道路中央。
+   *  典型做法：在编辑器中创建 NavigationQueryFilter 资产，配置 AreaCost
+   *  让边缘区域（窄通道）的 Cost 更高，使寻路自动偏向宽通道中央。
+   *  留空则使用默认查询过滤器。 */
+  UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Navigation|Pathfinding")
+  TSubclassOf<UNavigationQueryFilter> PathfindingFilterClass;
+
+  // ── 人物朝向指示器 ──────────────────────────────────────────────────────
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  bool bDrawForwardIndicator = true;
+
+  // 朝向指示线长度（厘米）
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  float ForwardIndicatorLengthCm = 60.0f;
+
+  // 箭头大小（厘米）
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  float ForwardIndicatorArrowSizeCm = 30.0f;
+
   UPROPERTY(EditAnywhere, Category = "Navigation|Command")
   bool bShowDebugMessages = true;
 
@@ -135,6 +191,19 @@ public:
   UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
   float DebugTurnRateDegreesPerSec = 45.0f;
 
+  // 手机端按钮单次转向角度（度）
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  float TurnStepDegrees = 15.0f;
+
+  // 是否在屏幕上显示左/右转按钮（手机端用）
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  bool bShowTurnControls = true;
+
+  /** 转向按钮的 Blueprint Widget 类（如 WBP_TurnControls）。
+   *  在该 Blueprint 中摆放 ← → 两个 UButton，变量名绑定为 BtnLeft / BtnRight。 */
+  UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
+  TSubclassOf<class UTurnControlsWidget> TurnControlsWidgetClass;
+
   // ── 状态机（friend 给各状态类访问内部） ─────────────────────────────
   friend class FPlanState;
   friend class FRotateState;
@@ -144,22 +213,17 @@ public:
 private:
   void RefreshDestinationMap();
   void FinishNavigation(bool bSuccess);
-  float EstimatePromptDurationSeconds(const FString &Message) const;
   float ComputePathDistanceMeters(const TArray<FVector> &PathPoints) const;
 
-  // TTS 队列
-  void EnqueuePrompt(const FString &Message, bool bInsertFirst = false);
-  void ClearNonCriticalPrompts();
-  void ProcessPromptScheduler(float CurrentTime);
-
-  // 蜂鸣
-  // Pan: -1=全左, 0=居中, +1=全右。Volume: 0..1 总音量缩放。
-  void SendBeepCommand(bool bActive, int32 FreqHz, float Pan = 0.0f, float Volume = 1.0f);
-  void StopBeep();
-  void PlayLocalBeep(bool bActive, int32 FreqHz, float Pan, float Volume, float IntervalMs);
+  // 朝向指示器
+  void DrawForwardIndicator(AActor *Owner);
 
   // 调试
   void HandleDebugKeyboardInput(AActor *Owner, float DeltaTime);
+
+  // 持续转向标记（按钮/Q/E 按住时 true，松开时 false）
+  bool bIsTurningLeft = false;
+  bool bIsTurningRight = false;
 
   // 状态机运行时
   FNavStateMachine StateMachine;
@@ -167,21 +231,24 @@ private:
   int32 CurrentWaypointIndex = -1;  // 下一个要去的路点索引（-1 未规划，0 是起点）
   TArray<FVector> PlannedWaypoints;
   float LastReplanCheckTime = 0.0f;
-  float LastBeepSendTime = 0.0f;
 
   // 导航目标
   TMap<FName, FVector> DestinationMap;
+  TMap<FName, FBox> DestinationBounds;  // 体积模式下的包围盒
   UNavigationSystemV1 *CachedNavSys = nullptr;
   FName ActiveTarget = NAME_None;
   FVector ActiveTargetLocation = FVector::ZeroVector;
   bool bIsNavigating = false;
 
-  // TTS 队列
-  TArray<FString> PendingPrompts;
-  FString CurrentRealtimePrompt;
-  bool bHasRealtimePromptPending = false;
-  float NextPromptDispatchTime = 0.0f;
+  // 音效组件（需手动挂载到同一 Actor 上，BeginPlay 时自动查找）
+  class UNavigationSoundComponent* SoundComp = nullptr;
 
   // 调试用
   FVector LastPlayerLocation = FVector::ZeroVector;
+
+  // 转向控制按钮 Widget 实例
+  TObjectPtr<UUserWidget> TurnControlsWidgetInstance;
+
+  // 体积模式：找包围盒上离玩家最近的点 → 投影到 NavMesh
+  FVector GetProjectedTargetForPlayer(const FVector& PlayerLoc) const;
 };

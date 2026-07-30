@@ -47,9 +47,9 @@ ENavState FNavStateMachine::EvaluateState(UNavigationComponent& Nav,
     return ENavState::Plan;
   }
 
-  // 未就绪
+  // 未就绪 → Plan（不回 None，避免卡死；Tick 会兜底重新寻路）
   if (Nav.CurrentWaypointIndex < 0 || Nav.PlannedWaypoints.Num() < 2) {
-    return ENavState::None;
+    return ENavState::Plan;
   }
 
   // 方向判断：Rotate ↔ Move
@@ -67,7 +67,7 @@ ENavState FNavStateMachine::EvaluateState(UNavigationComponent& Nav,
 
 void FNavStateMachine::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
   // TTS 播放中 → 等待播完再评估
-  if (Ctx.CurrentTime < Nav.NextPromptDispatchTime) {
+  if (Nav.SoundComp && Nav.SoundComp->IsPromptPlaying(Ctx.CurrentTime)) {
     return;
   }
 

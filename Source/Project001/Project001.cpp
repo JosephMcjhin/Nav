@@ -169,7 +169,7 @@ const FString &GetBuildTimestamp() {
   return Cached;
 }
 
-void SpeakLocalNavText(const FString &Text) {
+void SpeakLocalNavText(const FString &Text, float SpeedMultiplier) {
   if (!GLocalNavTTSEnabled || Text.IsEmpty()) {
     return;
   }
@@ -177,12 +177,14 @@ void SpeakLocalNavText(const FString &Text) {
 #if PLATFORM_WINDOWS
   FString Escaped = Text;
   Escaped.ReplaceInline(TEXT("'"), TEXT("''"));
+  // Rate: 0=normal, positive=faster. Map SpeedMultiplier 1.0→0, 2.0→5, 3.0→10
+  const int32 Rate = FMath::Clamp(FMath::RoundToInt((SpeedMultiplier - 1.0f) * 5.0f), -10, 10);
   const FString Script = FString::Printf(
       TEXT("Add-Type -AssemblyName System.Speech;")
       TEXT("$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;")
-      TEXT("$s.Rate=5;")
+      TEXT("$s.Rate=%d;")
       TEXT("$s.Speak('%s');"),
-      *Escaped);
+      Rate, *Escaped);
   FString Command = Script;
   Command.ReplaceInline(TEXT("\""), TEXT("\\\""));
   const FString Args = FString::Printf(

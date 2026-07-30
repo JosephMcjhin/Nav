@@ -1,6 +1,8 @@
 #include "NavigationComponent.h"
 
+#include "Blueprint/UserWidget.h"
 #include "DrawDebugHelpers.h"
+#include "TurnControlsWidget.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
@@ -9,6 +11,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NavigationMathLibrary.h"
 #include "NavigationSystem.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "NavigationStateMachine.h"
 #include "Project001.h"
 #include "Serialization/JsonReader.h"
@@ -21,30 +24,6 @@ void ShowNavDebugMessage(int32 Key, const FString &Message,
                          float Duration = 0.5f) {
   if (GEngine) {
     GEngine->AddOnScreenDebugMessage(Key, Duration, Color, Message);
-  }
-}
-
-void SendNavPromptMessage(AActor *OwnerActor, const FString &Message) {
-  if (!OwnerActor || Message.IsEmpty()) return;
-  Project001Console::SpeakLocalNavText(Message);
-  if (UServerConnectionComponent *ServerComp =
-          OwnerActor->FindComponentByClass<UServerConnectionComponent>()) {
-    const FString JsonStr =
-        FString::Printf(TEXT("{\"type\":\"nav_prompt\",\"text\":\"%s\"}"), *Message);
-    ServerComp->SendString(JsonStr);
-  }
-}
-
-void SendBeepMessage(AActor *OwnerActor, bool bActive, int32 FreqHz,
-                     float Pan, float Volume, float IntervalMs) {
-  if (!OwnerActor) return;
-  if (UServerConnectionComponent *ServerComp =
-          OwnerActor->FindComponentByClass<UServerConnectionComponent>()) {
-    const FString JsonStr = FString::Printf(
-        TEXT("{\"type\":\"nav_beep\",\"active\":%s,\"freq_hz\":%d,"
-         "\"pan\":%.3f,\"volume\":%.3f,\"interval_ms\":%.0f}"),
-        bActive ? TEXT("true") : TEXT("false"), FreqHz, Pan, Volume, IntervalMs);
-    ServerComp->SendString(JsonStr);
   }
 }
 }  // namespace
@@ -62,88 +41,113 @@ void UNavigationComponent::BeginPlay() {
   Super::BeginPlay();
   CachedNavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
   RefreshDestinationMap();
+
+  if (!SoundComp) {
+    SoundComp = GetOwner()->FindComponentByClass<UNavigationSoundComponent>();
+  }
+  if (SoundComp) SoundComp->Initialize(this);
+
+  // 创建转向控制按钮 Widget
+  if (bShowTurnControls && TurnControlsWidgetClass) {
+    APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+    if (PC) {
+      TurnControlsWidgetInstance = CreateWidget<UUserWidget>(PC, TurnControlsWidgetClass);
+      if (TurnControlsWidgetInstance) {
+        TurnControlsWidgetInstance->AddToViewport();
+        // 传入导航组件引用
+        if (UTurnControlsWidget* TurnWidget = Cast<UTurnControlsWidget>(TurnControlsWidgetInstance)) {
+          TurnWidget->SetNavigationComponent(this);
+        }
+      }
+    }
+  }
+}
+
+void UNavigationComponent::EndPlay(const EEndPlayReason::Type EndPlayReason) {
+  StopBeep();
+  StopDrip();
+  if (TurnControlsWidgetInstance) {
+    TurnControlsWidgetInstance->RemoveFromParent();
+    TurnControlsWidgetInstance = nullptr;
+  }
+  Super::EndPlay(EndPlayReason);
 }
 
 void UNavigationComponent::RefreshDestinationMap() {
   DestinationMap.Empty();
+  DestinationBounds.Empty();
   for (const FName &Tag : DestinationTags) {
     TArray<AActor *> FoundActors;
     UGameplayStatics::GetAllActorsWithTag(GetWorld(), Tag, FoundActors);
     for (AActor *Actor : FoundActors) {
       if (!Actor) continue;
-      FNavLocation ProjectedLoc;
       const FVector ActorLoc = Actor->GetActorLocation();
-      if (CachedNavSys && CachedNavSys->ProjectPointToNavigation(
-                              ActorLoc, ProjectedLoc, FVector(200.f))) {
-        DestinationMap.Add(Tag, ProjectedLoc.Location);
-      } else {
+
+      if (bUseActorCenterAsDestination) {
+        // 直接使用 Actor 中心（如 NavModifierVolume 的中心）
+        // 不在此时投影：玩家方向未知，预先投影会锁死一个固定边缘点
         DestinationMap.Add(Tag, ActorLoc);
+        // NavModifierVolume 没有普通几何组件，GetComponentsBoundingBox() 返回零。
+        // 用 GetActorBounds 从 BrushComponent 获取真正体积。
+        {
+          FVector Origin;
+          FVector BoxExtent;
+          Actor->GetActorBounds(false, Origin, BoxExtent);
+          DestinationBounds.Add(Tag, FBox(Origin - BoxExtent, Origin + BoxExtent));
+        }
+      } else {
+        // 投影到碰撞体边缘的 navmesh
+        FNavLocation ProjectedLoc;
+        if (CachedNavSys && CachedNavSys->ProjectPointToNavigation(
+                                ActorLoc, ProjectedLoc,
+                                FVector(DestinationProjectionRadiusCm))) {
+          DestinationMap.Add(Tag, ProjectedLoc.Location);
+        } else {
+          DestinationMap.Add(Tag, ActorLoc);
+        }
       }
       break;
     }
   }
 }
 
-float UNavigationComponent::EstimatePromptDurationSeconds(
-    const FString &Message) const {
-  float DurationSeconds = 0.2f;
-  for (const TCHAR Char : Message) {
-    switch (Char) {
-    case 0xFF0C:
-    case TEXT(','):
-      DurationSeconds += 0.18f;
-      break;
-    case 0x3002:
-    case TEXT('.'):
-    case 0xFF01:
-    case TEXT('!'):
-    case 0xFF1F:
-    case TEXT('?'):
-      DurationSeconds += 0.35f;
-      break;
-    case TEXT(' '):
-      DurationSeconds += 0.05f;
-      break;
-    default:
-      DurationSeconds += 0.35f;
-      break;
+void UNavigationComponent::ReplanFromDeviation(const FNavContext& Ctx) {
+  if (!CachedNavSys || ActiveTarget == NAME_None) return;
+
+  const FVector PathEnd = GetProjectedTargetForPlayer(Ctx.PlayerLoc);
+
+  if (PathfindingFilterClass) {
+    ANavigationData* NavData = CachedNavSys->GetDefaultNavDataInstance();
+    if (NavData) {
+      FSharedConstNavQueryFilter QueryFilter =
+          UNavigationQueryFilter::GetQueryFilter(
+              *NavData, GetWorld(), PathfindingFilterClass);
+      FPathFindingQuery Query(GetWorld(), *NavData, Ctx.PlayerLoc,
+                              PathEnd, QueryFilter);
+      FPathFindingResult Result =
+          CachedNavSys->FindPathSync(Query, EPathFindingMode::Regular);
+      if (Result.IsSuccessful() && Result.Path.IsValid()) {
+        PlannedWaypoints.Empty();
+        for (const FNavPathPoint& Pt : Result.Path->GetPathPoints()) {
+          PlannedWaypoints.Add(Pt.Location);
+        }
+        if (PlannedWaypoints.Num() > 0) {
+          CurrentWaypointIndex = 1;
+          LastReplanCheckTime = Ctx.CurrentTime;
+          return;
+        }
+      }
     }
   }
-  return DurationSeconds / 2.0f;
-}
 
-void UNavigationComponent::EnqueuePrompt(const FString &Message, bool bInsertFirst) {
-  if (Message.IsEmpty()) return;
-  if (bInsertFirst) {
-    PendingPrompts.Insert(Message, 0);
-  } else {
-    PendingPrompts.Add(Message);
+  // 回退：不带自定义过滤器（如果 PathfindingFilterClass 有值则带上）
+  UNavigationPath* Path = CachedNavSys->FindPathToLocationSynchronously(
+      GetWorld(), Ctx.PlayerLoc, PathEnd, nullptr, PathfindingFilterClass);
+  if (Path && Path->PathPoints.Num() > 0) {
+    PlannedWaypoints = Path->PathPoints;
+    CurrentWaypointIndex = 1;
+    LastReplanCheckTime = Ctx.CurrentTime;
   }
-}
-
-void UNavigationComponent::ClearNonCriticalPrompts() {
-  PendingPrompts.Empty();
-  CurrentRealtimePrompt.Empty();
-  bHasRealtimePromptPending = false;
-}
-
-void UNavigationComponent::ProcessPromptScheduler(float CurrentTime) {
-  // TTS 播放中 → 等待播完再发下一条
-  if (CurrentTime < NextPromptDispatchTime) return;
-
-  FString MessageToSend;
-  if (PendingPrompts.Num() > 0) {
-    MessageToSend = PendingPrompts[0];
-    PendingPrompts.RemoveAt(0);
-  } else if (bHasRealtimePromptPending) {
-    MessageToSend = CurrentRealtimePrompt;
-    bHasRealtimePromptPending = false;
-  }
-  if (MessageToSend.IsEmpty()) return;
-  SendNavPromptMessage(GetOwner(), MessageToSend);
-  NextPromptDispatchTime =
-      CurrentTime + EstimatePromptDurationSeconds(MessageToSend) +
-      PromptGapSeconds;
 }
 
 bool UNavigationComponent::NavigateTo(FName DestinationTag) {
@@ -158,7 +162,6 @@ bool UNavigationComponent::NavigateTo(FName DestinationTag) {
   PlannedWaypoints.Empty();
   CurrentWaypointIndex = -1;
   LastReplanCheckTime = 0.0f;
-  PendingPrompts.Empty();
   ClearNonCriticalPrompts();
   EnqueuePrompt(
       UNavigationMathLibrary::GetDestinationDisplayName(ActiveTarget) +
@@ -174,6 +177,36 @@ void UNavigationComponent::StopNavigation() {
   ClearNonCriticalPrompts();
   EnqueuePrompt(UTF8_TO_TCHAR(u8"导航结束"));
   FinishNavigation(false);
+}
+
+FVector UNavigationComponent::GetProjectedTargetForPlayer(
+    const FVector& PlayerLoc) const {
+  // 体积模式：找包围盒上离玩家最近的点 → 投影到 NavMesh
+  if (bUseActorCenterAsDestination) {
+    if (const FBox* Bounds = DestinationBounds.Find(ActiveTarget)) {
+      const FVector ClosestOnBounds = Bounds->GetClosestPointTo(PlayerLoc);
+      FNavLocation Proj;
+      if (CachedNavSys && CachedNavSys->ProjectPointToNavigation(
+                              ClosestOnBounds, Proj,
+                              FVector(DestinationProjectionRadiusCm))) {
+        return Proj.Location;
+      }
+    }
+  }
+  // 回退：直接投影中心
+  FNavLocation Proj;
+  if (CachedNavSys && CachedNavSys->ProjectPointToNavigation(
+                          ActiveTargetLocation, Proj,
+                          FVector(DestinationProjectionRadiusCm))) {
+    return Proj.Location;
+  }
+  return ActiveTargetLocation;
+}
+
+void UNavigationComponent::TurnPlayer(float Degrees) {
+  AActor *Owner = GetOwner();
+  if (!Owner) return;
+  Owner->AddActorLocalRotation(FRotator(0, Degrees, 0));
 }
 
 // ── 远程导航参数配置 ───────────────────────────────────────────────────────────
@@ -197,6 +230,10 @@ static const FRemoteConfigField GRemoteConfigFields[] = {
     {TEXT("RouteDeviationThresholdMeters"),  FRemoteConfigField::Float},
     {TEXT("RouteReplanCheckIntervalSeconds"), FRemoteConfigField::Float},
     {TEXT("WaypointReachRadiusMeters"),      FRemoteConfigField::Float},
+    {TEXT("TTSSpeedMultiplier"),             FRemoteConfigField::Float},
+    {TEXT("RotateBeepBaseFreqHz"),           FRemoteConfigField::Float},
+    {TEXT("RotateBeepFreqRangeHz"),          FRemoteConfigField::Float},
+    {TEXT("RotatePanStrength"),              FRemoteConfigField::Float},
 };
 }  // namespace
 
@@ -256,15 +293,27 @@ bool UNavigationComponent::ApplyRemoteConfig(const FString &JsonString) {
         ExecuteDriftDegrees = FValue;
       else if (FCString::Strcmp(Field.Key, TEXT("AlignIdleRepromptSeconds")) == 0)
         AlignIdleRepromptSeconds = FValue;
-      else if (FCString::Strcmp(Field.Key, TEXT("PromptGapSeconds")) == 0)
-        PromptGapSeconds = FValue;
+      else if (FCString::Strcmp(Field.Key, TEXT("PromptGapSeconds")) == 0) {
+        if (SoundComp) SoundComp->PromptGapSeconds = FValue;
+      }
       else if (FCString::Strcmp(Field.Key, TEXT("RouteDeviationThresholdMeters")) == 0)
         RouteDeviationThresholdMeters = FValue;
       else if (FCString::Strcmp(Field.Key, TEXT("RouteReplanCheckIntervalSeconds")) == 0)
         RouteReplanCheckIntervalSeconds = FValue;
       else if (FCString::Strcmp(Field.Key, TEXT("WaypointReachRadiusMeters")) == 0)
         WaypointReachRadiusMeters = FValue;
-
+      else if (FCString::Strcmp(Field.Key, TEXT("TTSSpeedMultiplier")) == 0) {
+        if (SoundComp) SoundComp->TTSSpeedMultiplier = FMath::Max(FValue, 0.1f);
+      }
+      else if (FCString::Strcmp(Field.Key, TEXT("RotateBeepBaseFreqHz")) == 0) {
+        if (SoundComp) SoundComp->RotateBeepBaseFreqHz = FValue;
+      }
+      else if (FCString::Strcmp(Field.Key, TEXT("RotateBeepFreqRangeHz")) == 0) {
+        if (SoundComp) SoundComp->RotateBeepFreqRangeHz = FValue;
+      }
+      else if (FCString::Strcmp(Field.Key, TEXT("RotatePanStrength")) == 0) {
+        if (SoundComp) SoundComp->RotatePanStrength = FMath::Clamp(FValue, 0.0f, 2.0f);
+      }
       AppliedKeys.Add(FString::Printf(TEXT("%s=%.3f"), Field.Key, FValue));
       ++AppliedCount;
     }
@@ -301,6 +350,7 @@ void UNavigationComponent::FinishNavigation(bool bSuccess) {
   PlannedWaypoints.Empty();
   CurrentWaypointIndex = -1;
   StopBeep();
+  StopDrip();
   StateMachine.Reset();
   OnNavigationArrived.Broadcast(FinishedTarget, bSuccess);
 }
@@ -314,37 +364,30 @@ float UNavigationComponent::ComputePathDistanceMeters(
   return Total / 100.0f / DistanceScale;
 }
 
+void UNavigationComponent::DrawForwardIndicator(AActor *Owner) {
+  if (!bDrawForwardIndicator || !Owner || !GetWorld()) return;
+
+  const FVector Start = Owner->GetActorLocation() + FVector(0, 0, 20.f);
+  const FVector Forward = Owner->GetActorForwardVector();
+  const FVector End = Start + Forward * ForwardIndicatorLengthCm;
+
+  // 用 UE 自带的箭头绘制函数，自动渲染出带填充三角箭头的效果
+  DrawDebugDirectionalArrow(GetWorld(), Start, End,
+                            ForwardIndicatorArrowSizeCm * 4.0f,  // 箭头大小
+                            FColor::Cyan, false, -1.f, 0, 4.0f   // 线粗 4
+  );
+}
+
 void UNavigationComponent::HandleDebugKeyboardInput(AActor *Owner, float DeltaTime) {
   APawn *Pawn = Cast<APawn>(Owner);
   if (!Pawn) return;
   APlayerController *PC = GetWorld()->GetFirstPlayerController();
   if (!PC) return;
-  const float Turn = DebugTurnRateDegreesPerSec * DeltaTime;
-  if (PC->IsInputKeyDown(EKeys::Q)) Pawn->AddActorLocalRotation(FRotator(0, -Turn, 0));
-  if (PC->IsInputKeyDown(EKeys::E)) Pawn->AddActorLocalRotation(FRotator(0, Turn, 0));
+  // Q/E：和屏幕按钮一样的按住持续旋转
+  if (PC->IsInputKeyDown(EKeys::Q)) TurnPlayer(-DebugTurnRateDegreesPerSec * DeltaTime);
+  if (PC->IsInputKeyDown(EKeys::E)) TurnPlayer(DebugTurnRateDegreesPerSec * DeltaTime);
+  // R：沿当前朝向行走
   if (PC->IsInputKeyDown(EKeys::R)) Pawn->AddMovementInput(Pawn->GetActorForwardVector(), 1.0f);
-}
-
-void UNavigationComponent::PlayLocalBeep(bool bActive, int32 FreqHz,
-                                         float Pan, float Volume, float IntervalMs) {
-  Project001Console::PlayLocalBeep(bActive, FreqHz, Pan, Volume, IntervalMs);
-}
-
-void UNavigationComponent::SendBeepCommand(bool bActive, int32 FreqHz,
-                                         float Pan, float Volume) {
-  const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-  if (bActive &&
-      (CurrentTime - LastBeepSendTime) < BeepUpdateIntervalSeconds) return;
-  SendBeepMessage(GetOwner(), bActive, FreqHz, Pan, Volume,
-                   BeepUpdateIntervalSeconds * 1000.0f);
-  if (Project001Console::IsLocalNavTTSEnabled()) PlayLocalBeep(bActive, FreqHz, Pan, Volume, BeepUpdateIntervalSeconds * 1000.0f);
-  LastBeepSendTime = CurrentTime;
-}
-
-void UNavigationComponent::StopBeep() {
-  SendBeepMessage(GetOwner(), false, 0, 0.0f, 1.0f, 0.0f);
-  if (Project001Console::IsLocalNavTTSEnabled())
-    Project001Console::PlayLocalBeep(false, 0, 0.0f, 1.0f, 0.0f);
 }
 
 void UNavigationComponent::TickComponent(
@@ -356,6 +399,13 @@ void UNavigationComponent::TickComponent(
   if (!Owner) return;
 
   if (bEnableDebugKeyboardControl) HandleDebugKeyboardInput(Owner, DeltaTime);
+
+  // 屏幕按钮按住持续旋转（标记由 OnPressed/OnReleased 控制，每帧不清零）
+  if (bIsTurningLeft) TurnPlayer(-DebugTurnRateDegreesPerSec * DeltaTime);
+  if (bIsTurningRight) TurnPlayer(DebugTurnRateDegreesPerSec * DeltaTime);
+
+  // 绘制人物朝向指示线+箭头
+  DrawForwardIndicator(Owner);
 
   const float CurrentTime = GetWorld()->GetTimeSeconds();
 
@@ -380,7 +430,6 @@ void UNavigationComponent::TickComponent(
   }
 
   if (!bIsNavigating || !CachedNavSys || ActiveTarget == NAME_None) {
-    ProcessPromptScheduler(CurrentTime);
     return;
   }
 
@@ -390,15 +439,26 @@ void UNavigationComponent::TickComponent(
   NavCtx.PlayerRight = Owner->GetActorRightVector();
   NavCtx.CurrentTime = CurrentTime;
 
+  // 动态更新最后路点：只剩终点时，每帧重新计算投影点
+  const bool bOnFinalWaypoint =
+      bUseActorCenterAsDestination && PlannedWaypoints.Num() > 0 &&
+      CurrentWaypointIndex == PlannedWaypoints.Num() - 1;
+  if (bOnFinalWaypoint) {
+    PlannedWaypoints.Last() = GetProjectedTargetForPlayer(NavCtx.PlayerLoc);
+  }
+
+  // 到达：只剩终点时用投影点距离，否则用体积中心距离
+  const FVector ArrivalRef =
+      bOnFinalWaypoint ? PlannedWaypoints.Last() : ActiveTargetLocation;
   const float DirectDist =
-      FVector::Dist2D(NavCtx.PlayerLoc, ActiveTargetLocation) / 100.0f / DistanceScale;
+      FVector::Dist2D(NavCtx.PlayerLoc, ArrivalRef) / 100.0f / DistanceScale;
 
   // 到达
   if (DirectDist <= ArrivalDistanceMeters) {
     // 清掉之前的提示，只播到达信息
     ClearNonCriticalPrompts();
     const FVector ToTarget2D =
-        (ActiveTargetLocation - NavCtx.PlayerLoc).GetSafeNormal2D();
+        (ArrivalRef - NavCtx.PlayerLoc).GetSafeNormal2D();
     const FVector Forward2D = NavCtx.PlayerForward.GetSafeNormal2D();
     const FVector Right2D = NavCtx.PlayerRight.GetSafeNormal2D();
     const FString DirectionPhrase =
@@ -411,21 +471,13 @@ void UNavigationComponent::TickComponent(
                         UTF8_TO_TCHAR(u8"到了，在你"),
                         *DirectionPhrase),
         true);
+    // 播放到达终点音效
+    SendSoundEffect(ENavSoundCategory::SFX_Arrival);
     FinishNavigation(true);
-    ProcessPromptScheduler(CurrentTime);
     LastPlayerLocation = NavCtx.PlayerLoc;
     return;
   }
 
-  // 投影目标点
-  FNavLocation ProjectedTarget;
-  if (!CachedNavSys->ProjectPointToNavigation(ActiveTargetLocation, ProjectedTarget, FVector(200.f))) {
-    ProcessPromptScheduler(CurrentTime);
-    LastPlayerLocation = NavCtx.PlayerLoc;
-    return;
-  }
-
-  // Tick 状态机（EvaluateState + OnEnter + Tick）
   StateMachine.Tick(*this, NavCtx);
 
   // 偏差检测（仅在正常导航中）
@@ -434,8 +486,9 @@ void UNavigationComponent::TickComponent(
     LastReplanCheckTime = CurrentTime;
 
     // 检测 A：全局实时路径比计划路径距离短很多 → 偏移
+    const FVector LivePathEnd = GetProjectedTargetForPlayer(NavCtx.PlayerLoc);
     UNavigationPath *LivePath = CachedNavSys->FindPathToLocationSynchronously(
-        GetWorld(), NavCtx.PlayerLoc, ProjectedTarget.Location);
+        GetWorld(), NavCtx.PlayerLoc, LivePathEnd);
     bool bDeviated = false;
     if (LivePath && LivePath->PathPoints.Num() >= 2) {
       float LiveTotal = 0.0f;
@@ -467,6 +520,8 @@ void UNavigationComponent::TickComponent(
 
     if (bDeviated) {
       EnqueuePrompt(UTF8_TO_TCHAR(u8"已偏离路线，重新规划路线"));
+      // 播放偏离/错误音效
+      SendSoundEffect(ENavSoundCategory::SFX_Deviation);
       CurrentWaypointIndex = -1;
       LastReplanCheckTime = CurrentTime;
     }
@@ -474,7 +529,6 @@ void UNavigationComponent::TickComponent(
 
   // 未就绪则跳过
   if (CurrentWaypointIndex < 0 || PlannedWaypoints.Num() < 2) {
-    ProcessPromptScheduler(CurrentTime);
     LastPlayerLocation = NavCtx.PlayerLoc;
     return;
   }
@@ -488,7 +542,7 @@ void UNavigationComponent::TickComponent(
     if (DistToCurrWP <= WaypointReachRadiusMeters &&
         CurrentWaypointIndex < PlannedWaypoints.Num() - 1) {
       ClearNonCriticalPrompts();
-      EnqueuePrompt(UTF8_TO_TCHAR(u8"到达路点。"), true);
+      SendSoundEffect(ENavSoundCategory::SFX_WaypointReached);
       CurrentWaypointIndex++;
       StopBeep();
     }
@@ -514,6 +568,5 @@ void UNavigationComponent::TickComponent(
     }
   }
 
-  ProcessPromptScheduler(CurrentTime);
   LastPlayerLocation = NavCtx.PlayerLoc;
 }
