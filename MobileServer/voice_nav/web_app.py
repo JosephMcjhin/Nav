@@ -8,6 +8,7 @@ REST        POST /api/beacon     → UBeacon Tools webhook (rssi / distance)
 
 import json
 import logging
+import queue
 import threading
 import time
 import base64
@@ -39,6 +40,8 @@ def log_all_requests():
 # ── Configuration ───────────────────────────────────────────────────────────────
 ENABLE_VERBOSE_LOGS = False  # 开关：将此处改为 True 即可打开所有被注释掉的调试日志！
 UWB_FILTER_ALPHA = 0.15  # 低通滤波系数：越小越平滑（0.05~0.3）。设为 1.0 关闭滤波。
+UE_COMMAND_QUEUE_SIZE = 128
+UE_STATE_SEND_HZ = 30.0
 
 # ── Shared state ───────────────────────────────────────────────────────────────
 active_ws: dict = {}      # ws -> { 'ip': str, 'connected_at': float }
@@ -48,6 +51,10 @@ ue_client_ws = None
 glasses_client_ws = None
 last_missing_glasses_log = 0.0
 last_no_ue_log = 0.0
+ue_command_queue: "queue.Queue[dict]" = queue.Queue(maxsize=UE_COMMAND_QUEUE_SIZE)
+ue_latest_state: dict[str, dict] = {}
+ue_latest_state_lock = threading.Lock()
+ue_sender_event = threading.Event()
 
 def broadcast(payload: dict):
     """Send JSON to all connected WebSocket clients."""
@@ -74,32 +81,109 @@ def send_json(ws, payload: dict) -> bool:
         return False
 
 
-def send_to_ue(payload: dict) -> bool:
-    """Send JSON to the UE client, with a single-client fallback for mobile."""
+def _get_ue_targets() -> list:
     if ue_client_ws in active_ws:
-        ok = send_json(ue_client_ws, payload)
-        if ok:
-            return True
+        return [ue_client_ws]
 
     ue_clients = [ws for ws, meta in active_ws.items() if meta.get("role") == "ue"]
     if ue_clients:
-        sent = False
-        for ws in ue_clients:
-            sent = send_json(ws, payload) or sent
-        return sent
+        return ue_clients
 
     if len(active_ws) == 1:
         only_ws = next(iter(active_ws.keys()))
         meta = active_ws.get(only_ws, {})
-        log.warning(
-            f"No registered UE client; falling back to the only WebSocket "
-            f"client ip={meta.get('ip', 'unknown')} role={meta.get('role', 'unregistered')} "
-            f"payload={payload.get('type')}"
-        )
-        return send_json(only_ws, payload)
+        if ENABLE_VERBOSE_LOGS:
+            log.info(
+                f"No registered UE client; falling back to the only WebSocket "
+                f"client ip={meta.get('ip', 'unknown')} role={meta.get('role', 'unregistered')}"
+            )
+        return [only_ws]
 
-    _log_no_ue_client_once()
-    return False
+    return []
+
+
+def _send_to_ue_now(payload: dict) -> bool:
+    """Send JSON to UE from the single UE sender thread."""
+    targets = _get_ue_targets()
+    if not targets:
+        _log_no_ue_client_once()
+        return False
+
+    sent = False
+    for ws in targets:
+        sent = send_json(ws, payload) or sent
+    return sent
+
+
+def _enqueue_ue_command(payload: dict) -> bool:
+    if not _get_ue_targets():
+        _log_no_ue_client_once()
+        return False
+    try:
+        ue_command_queue.put_nowait(payload)
+        ue_sender_event.set()
+        return True
+    except queue.Full:
+        log.warning("UE command queue full; dropping payload=%s", payload.get("type"))
+        return False
+
+
+def _update_latest_ue_state(payload: dict) -> bool:
+    if not _get_ue_targets():
+        _log_no_ue_client_once()
+        return False
+    payload_type = payload.get("type")
+    if not payload_type:
+        return False
+    with ue_latest_state_lock:
+        ue_latest_state[payload_type] = payload
+    ue_sender_event.set()
+    return True
+
+
+def send_to_ue(payload: dict, *, latest_state: bool = False) -> bool:
+    """Queue JSON for UE without blocking sensor or request handler threads."""
+    if latest_state:
+        return _update_latest_ue_state(payload)
+    return _enqueue_ue_command(payload)
+
+
+def _pop_latest_ue_states() -> list[dict]:
+    with ue_latest_state_lock:
+        states = list(ue_latest_state.values())
+        ue_latest_state.clear()
+    return states
+
+
+def _ue_sender_loop():
+    min_state_interval = 1.0 / UE_STATE_SEND_HZ
+    last_state_send = 0.0
+    log.info(
+        f"UE sender active: command_queue={UE_COMMAND_QUEUE_SIZE} "
+        f"state_rate={UE_STATE_SEND_HZ:.0f}Hz"
+    )
+    while True:
+        ue_sender_event.wait(timeout=min_state_interval)
+        ue_sender_event.clear()
+
+        while True:
+            try:
+                payload = ue_command_queue.get_nowait()
+            except queue.Empty:
+                break
+            _send_to_ue_now(payload)
+
+        now = time.time()
+        if now - last_state_send < min_state_interval:
+            continue
+
+        for payload in _pop_latest_ue_states():
+            _send_to_ue_now(payload)
+        last_state_send = now
+
+
+def start_ue_sender():
+    threading.Thread(target=_ue_sender_loop, daemon=True, name="UESender").start()
 
 
 def _log_no_ue_client_once():
@@ -440,7 +524,7 @@ def ws_handler(ws):
                     continue
                 # Apply current offset and broadcast to UE
                 corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
-                send_to_ue({"type": "set_rotation", "yaw": corrected_yaw})
+                send_to_ue({"type": "set_rotation", "yaw": corrected_yaw}, latest_state=True)
 
             elif msg_type == "nav_request":
                 if get_ws_role(ws) != "glasses":
@@ -590,7 +674,7 @@ def _udp_uwb_listener(port: int = 9003):
                         continue
                     # Apply current offset and broadcast to UE
                     corrected_yaw = uwb_calibrator.apply_imu_offset(raw_yaw)
-                    send_to_ue({"type": "set_rotation", "yaw": corrected_yaw})
+                    send_to_ue({"type": "set_rotation", "yaw": corrected_yaw}, latest_state=True)
                 continue
             
             if payload.get("name") == "Pos" and payload.get("deviceName", "").startswith("T"):
@@ -609,7 +693,13 @@ def _udp_uwb_listener(port: int = 9003):
                     transformed = uwb_calibrator.transform_uwb_to_ue(current_x, current_y)
                     if transformed:
                         ue_x, ue_y = transformed
-                        send_to_ue({"type": "set_target", "x": ue_x, "y": ue_y, "z": 0, "calibrated": True})
+                        send_to_ue({
+                            "type": "set_target",
+                            "x": ue_x,
+                            "y": ue_y,
+                            "z": 0,
+                            "calibrated": True
+                        }, latest_state=True)
         except Exception as e:
             pass
 
@@ -645,6 +735,9 @@ if __name__ == "__main__":
     log.info(f"📱 手机端请输入此 IP: ws://{local_ip}:{args.port}/ws")
     log.info("=" * 60)
     log.info("")
+
+    # Start outbound UE sender before sensor traffic begins.
+    start_ue_sender()
 
     # Start UWB listener thread
     threading.Thread(target=_udp_uwb_listener, daemon=True).start()
