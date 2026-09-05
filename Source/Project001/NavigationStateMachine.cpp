@@ -59,7 +59,7 @@ ENavState FNavStateMachine::EvaluateState(UNavigationComponent& Nav,
                                               : ENavState::Rotate;
   }
   // Move 状态：偏移过多 → Rotate
-  if (AbsErr > Nav.ExecuteDriftDegrees) {
+  if (AbsErr > Nav.GetEffectiveExecuteDriftDegrees(Ctx.PlayerLoc)) {
     return ENavState::Rotate;
   }
   return ENavState::Move;

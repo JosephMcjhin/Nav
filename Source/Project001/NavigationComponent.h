@@ -20,6 +20,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
 
 class UNavigationSystemV1;
 class UNavigationQueryFilter;
+class UCameraComponent;
+class UCameraModeWidget;
+class ACameraActor;
 
 UCLASS(ClassGroup = (Navigation), meta = (BlueprintSpawnableComponent))
 class PROJECT001_API UNavigationComponent : public UActorComponent {
@@ -61,6 +64,10 @@ public:
 
   UFUNCTION(BlueprintCallable, Category = "Navigation|Command")
   bool IsNavigating() const { return bIsNavigating; }
+
+  /** 切换屏幕相机模式：0=第一人称，1=第三人称，2=自由视角。 */
+  UFUNCTION(BlueprintCallable, Category = "Camera")
+  void SetCameraMode(int32 Mode);
 
   /** 偏离后全局重新寻路，由 PlanState::OnEnter / Tick 调用。 */
   void ReplanFromDeviation(const FNavContext& Ctx);
@@ -199,6 +206,24 @@ public:
   UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
   bool bShowTurnControls = true;
 
+  /** 相机模式按钮蓝图，父类必须为 CameraModeWidget（如 WBP_CameraMode）。 */
+  UPROPERTY(EditAnywhere, Category = "Camera")
+  TSubclassOf<UCameraModeWidget> CameraModeWidgetClass;
+
+  // 第一人称相机：相对玩家原点的前移距离（厘米）。
+  UPROPERTY(EditAnywhere, Category = "Camera")
+  float FirstPersonForwardOffsetCm = 12.0f;
+
+  // 第一人称相机高度占玩家完整身高的比例。
+  UPROPERTY(EditAnywhere, Category = "Camera",
+            meta = (ClampMin = "0.0", ClampMax = "1.0"))
+  float FirstPersonHeightRatio = 0.7f;
+
+  // 自由视角平移速度（厘米/屏幕像素）。
+  UPROPERTY(EditAnywhere, Category = "Camera",
+            meta = (ClampMin = "0.01"))
+  float FreeCameraPanSpeed = 1.0f;
+
   /** 转向按钮的 Blueprint Widget 类（如 WBP_TurnControls）。
    *  在该 Blueprint 中摆放 ← → 两个 UButton，变量名绑定为 BtnLeft / BtnRight。 */
   UPROPERTY(EditAnywhere, Category = "Navigation|Debug")
@@ -214,6 +239,11 @@ private:
   void RefreshDestinationMap();
   void FinishNavigation(bool bSuccess);
   float ComputePathDistanceMeters(const TArray<FVector> &PathPoints) const;
+  float GetEffectiveExecuteDriftDegrees(const FVector &PlayerLoc);
+
+  void InitializeCameraModes();
+  void UpdateFreeCameraInput();
+  void PanFreeCamera(const FVector2D &ScreenDelta);
 
   // 朝向指示器
   void DrawForwardIndicator(AActor *Owner);
@@ -232,6 +262,11 @@ private:
   TArray<FVector> PlannedWaypoints;
   float LastReplanCheckTime = 0.0f;
 
+  // 局部 NavMesh 空间探测缓存，避免每帧重复查询。
+  float LastDriftProbeTime = -BIG_NUMBER;
+  float LastDriftProbeBaseDegrees = -1.0f;
+  float CachedEffectiveDriftDegrees = -1.0f;
+
   // 导航目标
   TMap<FName, FVector> DestinationMap;
   TMap<FName, FBox> DestinationBounds;  // 体积模式下的包围盒
@@ -248,6 +283,26 @@ private:
 
   // 转向控制按钮 Widget 实例
   TObjectPtr<UUserWidget> TurnControlsWidgetInstance;
+
+  // 相机模式
+  enum class ECameraMode : uint8 { FirstPerson, ThirdPerson, Free };
+  ECameraMode ActiveCameraMode = ECameraMode::ThirdPerson;
+  bool bCameraModesInitialized = false;
+  UPROPERTY(Transient)
+  TObjectPtr<UCameraComponent> FirstPersonCamera;
+  UPROPERTY(Transient)
+  TObjectPtr<UCameraComponent> ThirdPersonCamera;
+  UPROPERTY(Transient)
+  TObjectPtr<ACameraActor> FirstPersonViewActor;
+  UPROPERTY(Transient)
+  TObjectPtr<ACameraActor> ThirdPersonViewActor;
+  UPROPERTY(Transient)
+  TObjectPtr<ACameraActor> FreeCameraActor;
+  UPROPERTY(Transient)
+  TObjectPtr<UCameraModeWidget> CameraModeWidgetInstance;
+  bool bFreePointerDown = false;
+  bool bFreeCameraInitialized = false;
+  FVector2D LastFreePointerPosition = FVector2D::ZeroVector;
 
   // 体积模式：找包围盒上离玩家最近的点 → 投影到 NavMesh
   FVector GetProjectedTargetForPlayer(const FVector& PlayerLoc) const;

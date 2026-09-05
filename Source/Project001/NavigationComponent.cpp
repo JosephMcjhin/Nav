@@ -1,8 +1,11 @@
 #include "NavigationComponent.h"
 
 #include "Blueprint/UserWidget.h"
+#include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
 #include "CollisionQueryParams.h"
 #include "Components/CapsuleComponent.h"
+#include "CameraModeWidget.h"
 #include "DrawDebugHelpers.h"
 #include "TurnControlsWidget.h"
 #include "GameFramework/Character.h"
@@ -44,6 +47,7 @@ void UNavigationComponent::BeginPlay() {
   Super::BeginPlay();
   CachedNavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
   RefreshDestinationMap();
+  InitializeCameraModes();
 
   if (!SoundComp) {
     SoundComp = GetOwner()->FindComponentByClass<UNavigationSoundComponent>();
@@ -69,11 +73,253 @@ void UNavigationComponent::BeginPlay() {
 void UNavigationComponent::EndPlay(const EEndPlayReason::Type EndPlayReason) {
   StopBeep();
   StopDrip();
+  if (CameraModeWidgetInstance) {
+    CameraModeWidgetInstance->RemoveFromParent();
+    CameraModeWidgetInstance = nullptr;
+  }
+  if (FreeCameraActor) {
+    FreeCameraActor->Destroy();
+    FreeCameraActor = nullptr;
+  }
+  if (FirstPersonViewActor) {
+    FirstPersonViewActor->Destroy();
+    FirstPersonViewActor = nullptr;
+  }
+  if (ThirdPersonViewActor) {
+    ThirdPersonViewActor->Destroy();
+    ThirdPersonViewActor = nullptr;
+  }
   if (TurnControlsWidgetInstance) {
     TurnControlsWidgetInstance->RemoveFromParent();
     TurnControlsWidgetInstance = nullptr;
   }
   Super::EndPlay(EndPlayReason);
+}
+
+void UNavigationComponent::InitializeCameraModes() {
+  if (bCameraModesInitialized) return;
+
+  AActor *Owner = GetOwner();
+  UWorld *World = GetWorld();
+  APlayerController *PC = World ? World->GetFirstPlayerController() : nullptr;
+  if (!Owner || !World || !PC) return;
+
+  // 复用蓝图里现有的第三人称相机，确保保留当前俯视距离和角度。
+  ThirdPersonCamera = Owner->FindComponentByClass<UCameraComponent>();
+  if (!ThirdPersonCamera && Owner->GetRootComponent()) {
+    ThirdPersonCamera = NewObject<UCameraComponent>(Owner, TEXT("ThirdPersonCamera"));
+    ThirdPersonCamera->SetupAttachment(Owner->GetRootComponent());
+    ThirdPersonCamera->SetRelativeLocation(FVector(0.0f, 0.0f, 600.0f));
+    ThirdPersonCamera->SetRelativeRotation(FRotator(-60.0f, 0.0f, 0.0f));
+    ThirdPersonCamera->RegisterComponent();
+  }
+
+  if (Owner->GetRootComponent()) {
+    FirstPersonCamera = NewObject<UCameraComponent>(Owner, TEXT("FirstPersonCamera"));
+    FirstPersonCamera->SetupAttachment(Owner->GetRootComponent());
+
+    float HalfHeight = 90.0f;
+    if (const ACharacter *Character = Cast<ACharacter>(Owner)) {
+      if (const UCapsuleComponent *Capsule = Character->GetCapsuleComponent()) {
+        HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+      }
+    }
+
+    // 角色原点通常位于胶囊体中心，将离地高度换算为相对胶囊中心的高度。
+    const float FirstPersonHeight =
+        HalfHeight * (FirstPersonHeightRatio * 2.0f - 1.0f);
+    FirstPersonCamera->SetRelativeLocation(
+        FVector(FirstPersonForwardOffsetCm, 0.0f, FirstPersonHeight));
+    FirstPersonCamera->SetRelativeRotation(FRotator::ZeroRotator);
+    FirstPersonCamera->bUsePawnControlRotation = false;
+    FirstPersonCamera->bAutoActivate = false;
+    if (ThirdPersonCamera) {
+      FirstPersonCamera->SetFieldOfView(ThirdPersonCamera->FieldOfView);
+    }
+    FirstPersonCamera->RegisterComponent();
+
+    FActorSpawnParameters FirstPersonSpawnParams;
+    FirstPersonSpawnParams.Owner = Owner;
+    FirstPersonSpawnParams.SpawnCollisionHandlingOverride =
+        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    FirstPersonViewActor = World->SpawnActor<ACameraActor>(
+        FVector::ZeroVector, FRotator::ZeroRotator, FirstPersonSpawnParams);
+    if (FirstPersonViewActor) {
+      FirstPersonViewActor->AttachToComponent(
+          Owner->GetRootComponent(),
+          FAttachmentTransformRules::KeepRelativeTransform);
+      FirstPersonViewActor->SetActorRelativeLocation(
+          FVector(FirstPersonForwardOffsetCm, 0.0f, FirstPersonHeight));
+      FirstPersonViewActor->SetActorRelativeRotation(FRotator::ZeroRotator);
+      if (FirstPersonViewActor->GetCameraComponent() && ThirdPersonCamera) {
+        FirstPersonViewActor->GetCameraComponent()->SetFieldOfView(
+            ThirdPersonCamera->FieldOfView);
+      }
+    }
+  }
+
+  if (ThirdPersonCamera) {
+    const FVector InitialLocation = ThirdPersonCamera->GetComponentLocation();
+    const FRotator InitialRotation = ThirdPersonCamera->GetComponentRotation();
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.Owner = Owner;
+    SpawnParams.SpawnCollisionHandlingOverride =
+        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    FreeCameraActor = World->SpawnActor<ACameraActor>(
+        InitialLocation, InitialRotation, SpawnParams);
+    if (FreeCameraActor && FreeCameraActor->GetCameraComponent()) {
+      FreeCameraActor->GetCameraComponent()->SetFieldOfView(
+          ThirdPersonCamera->FieldOfView);
+    }
+
+    FActorSpawnParameters ThirdPersonSpawnParams;
+    ThirdPersonSpawnParams.Owner = Owner;
+    ThirdPersonSpawnParams.SpawnCollisionHandlingOverride =
+        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    ThirdPersonViewActor = World->SpawnActor<ACameraActor>(
+        InitialLocation, InitialRotation, ThirdPersonSpawnParams);
+    if (ThirdPersonViewActor) {
+      ThirdPersonViewActor->AttachToComponent(
+          ThirdPersonCamera,
+          FAttachmentTransformRules::KeepWorldTransform);
+      if (ThirdPersonViewActor->GetCameraComponent()) {
+        ThirdPersonViewActor->GetCameraComponent()->SetFieldOfView(
+            ThirdPersonCamera->FieldOfView);
+      }
+    }
+  }
+
+  // 让所有相机跟随视口宽高比（不锁定 16:9），避免非 16:9 视口出现上下黑边。
+  // 注意：ACameraActor 的相机默认会锁定 AspectRatio，必须显式关闭。
+  {
+    UCameraComponent *Cameras[] = {
+        ThirdPersonCamera,
+        FirstPersonCamera,
+        FreeCameraActor ? FreeCameraActor->GetCameraComponent() : nullptr,
+        FirstPersonViewActor ? FirstPersonViewActor->GetCameraComponent()
+                             : nullptr,
+        ThirdPersonViewActor ? ThirdPersonViewActor->GetCameraComponent()
+                             : nullptr,
+    };
+    for (UCameraComponent *Cam : Cameras) {
+      if (Cam) Cam->bConstrainAspectRatio = false;
+    }
+  }
+
+  if (CameraModeWidgetClass) {
+    CameraModeWidgetInstance =
+        CreateWidget<UCameraModeWidget>(PC, CameraModeWidgetClass);
+  }
+  if (CameraModeWidgetInstance) {
+    CameraModeWidgetInstance->SetNavigationComponent(this);
+    // 蓝图使用全屏 Canvas 的顶部居中锚点；空白区域不拦截游戏输入。
+    CameraModeWidgetInstance->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+    CameraModeWidgetInstance->AddToViewport(20);
+
+    FInputModeGameAndUI InputMode;
+    InputMode.SetHideCursorDuringCapture(false);
+    PC->SetInputMode(InputMode);
+    PC->bShowMouseCursor = true;
+  } else if (bShowDebugMessages) {
+    ShowNavDebugMessage(
+        10001,
+        CameraModeWidgetClass ? TEXT("CameraUI: CreateWidget failed")
+                              : TEXT("CameraUI: Assign CameraModeWidgetClass in NavigationComponent"),
+        FColor::Red, 8.0f);
+  }
+
+  SetCameraMode(1);
+  bCameraModesInitialized = true;
+}
+
+void UNavigationComponent::SetCameraMode(int32 Mode) {
+  AActor *Owner = GetOwner();
+  APlayerController *PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+  if (!Owner || !PC) return;
+
+  const int32 ClampedMode = FMath::Clamp(Mode, 0, 2);
+  ActiveCameraMode = static_cast<ECameraMode>(ClampedMode);
+  bFreePointerDown = false;
+
+  if (ActiveCameraMode == ECameraMode::Free && FreeCameraActor) {
+    // 第一次切换到自由视角时，以玩家当前的第三人称相机位置为起点。
+    if (!bFreeCameraInitialized && ThirdPersonCamera) {
+      FreeCameraActor->SetActorLocation(ThirdPersonCamera->GetComponentLocation());
+      FreeCameraActor->SetActorRotation(ThirdPersonCamera->GetComponentRotation());
+      bFreeCameraInitialized = true;
+    }
+    if (FirstPersonCamera) FirstPersonCamera->SetActive(false);
+    if (ThirdPersonCamera) ThirdPersonCamera->SetActive(false);
+    PC->SetViewTargetWithBlend(FreeCameraActor, 0.15f,
+                               VTBlend_EaseInOut);
+    return;
+  }
+
+  if (ActiveCameraMode == ECameraMode::Free) {
+    // 自由相机创建失败时保留可用的第三人称视角。
+    ActiveCameraMode = ECameraMode::ThirdPerson;
+  }
+
+  if (FirstPersonCamera) FirstPersonCamera->SetActive(false);
+  if (ThirdPersonCamera) ThirdPersonCamera->SetActive(false);
+
+  AActor* ViewTarget = ActiveCameraMode == ECameraMode::FirstPerson
+                           ? FirstPersonViewActor.Get()
+                           : ThirdPersonViewActor.Get();
+  if (!ViewTarget) {
+    // 相机 Actor 创建失败时保留原来的玩家视图作为降级路径。
+    ViewTarget = Owner;
+  }
+  PC->SetViewTargetWithBlend(ViewTarget, 0.15f, VTBlend_EaseInOut);
+}
+
+void UNavigationComponent::PanFreeCamera(const FVector2D &ScreenDelta) {
+  if (ActiveCameraMode != ECameraMode::Free || !FreeCameraActor) return;
+
+  const FRotator CameraYaw(0.0f, FreeCameraActor->GetActorRotation().Yaw, 0.0f);
+  const FVector Right = CameraYaw.RotateVector(FVector::RightVector);
+  const FVector Forward = CameraYaw.RotateVector(FVector::ForwardVector);
+  const FVector WorldDelta =
+      (-Right * ScreenDelta.X + Forward * ScreenDelta.Y) *
+      FreeCameraPanSpeed;
+  FreeCameraActor->AddActorWorldOffset(
+      FVector(WorldDelta.X, WorldDelta.Y, 0.0f), false);
+}
+
+void UNavigationComponent::UpdateFreeCameraInput() {
+  if (ActiveCameraMode != ECameraMode::Free || !GetWorld()) {
+    bFreePointerDown = false;
+    return;
+  }
+
+  APlayerController *PC = GetWorld()->GetFirstPlayerController();
+  if (!PC) return;
+
+  FVector2D PointerPosition = FVector2D::ZeroVector;
+  bool bPointerPressed = false;
+  if (PC->IsInputKeyDown(EKeys::LeftMouseButton)) {
+    float MouseX = 0.0f;
+    float MouseY = 0.0f;
+    bPointerPressed = PC->GetMousePosition(MouseX, MouseY);
+    PointerPosition = FVector2D(MouseX, MouseY);
+  } else {
+    float TouchX = 0.0f;
+    float TouchY = 0.0f;
+    PC->GetInputTouchState(ETouchIndex::Touch1, TouchX, TouchY,
+                           bPointerPressed);
+    PointerPosition = FVector2D(TouchX, TouchY);
+  }
+
+  if (!bPointerPressed) {
+    bFreePointerDown = false;
+    return;
+  }
+
+  if (bFreePointerDown) {
+    PanFreeCamera(PointerPosition - LastFreePointerPosition);
+  }
+  LastFreePointerPosition = PointerPosition;
+  bFreePointerDown = true;
 }
 
 void UNavigationComponent::RefreshDestinationMap() {
@@ -363,6 +609,83 @@ float UNavigationComponent::ComputePathDistanceMeters(
   return Total / 100.0f / DistanceScale;
 }
 
+float UNavigationComponent::GetEffectiveExecuteDriftDegrees(
+    const FVector &PlayerLoc) {
+  constexpr float FullProbeRadiusCm = 100.0f;
+  // 阈值收紧区间：最终宽度 >= 0.5m 不限制，<= 0.2m 达最大限制（阈值一半）。
+  constexpr float RestrictionStartCm = 50.0f;  // 0.5m 开始限制
+  constexpr float RestrictionMaxCm = 20.0f;    // 0.2m 最大限制
+  // 8 个方向（每 45° 一个），与对向成对判断是否身处窄通道。
+  constexpr int32 DirectionSampleCount = 8;
+  constexpr int32 BinarySearchSteps = 6;
+  constexpr float ProjectionToleranceCm = 5.0f;
+  constexpr float ProjectionHeightCm = 100.0f;
+
+  if (!CachedNavSys || !GetWorld()) {
+    return ExecuteDriftDegrees;
+  }
+
+  const float CurrentTime = GetWorld()->GetTimeSeconds();
+  constexpr float ProbeRefreshIntervalSeconds = 1.0f;
+  const bool bProbeCacheValid =
+      CachedEffectiveDriftDegrees >= 0.0f &&
+      FMath::IsNearlyEqual(LastDriftProbeBaseDegrees, ExecuteDriftDegrees) &&
+      CurrentTime - LastDriftProbeTime < ProbeRefreshIntervalSeconds;
+  if (bProbeCacheValid) {
+    return CachedEffectiveDriftDegrees;
+  }
+
+  // 探测 8 个方向的可通行半径。
+  float ClearanceCm[DirectionSampleCount];
+  for (int32 i = 0; i < DirectionSampleCount; ++i) {
+    const float Angle = 2.0f * PI * static_cast<float>(i) /
+                        static_cast<float>(DirectionSampleCount);
+    const FVector Direction(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f);
+    float LowCm = 0.0f;
+    float HighCm = FullProbeRadiusCm;
+
+    for (int32 Step = 0; Step < BinarySearchSteps; ++Step) {
+      const float TestRadiusCm = (LowCm + HighCm) * 0.5f;
+      const FVector TestPoint = PlayerLoc + Direction * TestRadiusCm;
+      FNavLocation ProjectedLocation;
+      const bool bReachable = CachedNavSys->ProjectPointToNavigation(
+          TestPoint, ProjectedLocation,
+          FVector(ProjectionToleranceCm, ProjectionToleranceCm,
+                  ProjectionHeightCm));
+      if (bReachable) {
+        LowCm = TestRadiusCm;
+      } else {
+        HighCm = TestRadiusCm;
+      }
+    }
+    ClearanceCm[i] = LowCm;
+  }
+
+  // 窄通道判定：某方向与其对向（180°）取较大值——只有同一轴线两端都近
+  // （真正的通道）才会得到小值，单侧贴墙、另一侧开阔不会被限制；
+  // 再对 8 个方向取最小值，得到最终可通行宽度。
+  float NarrowestPairClearanceCm = FullProbeRadiusCm;
+  for (int32 i = 0; i < DirectionSampleCount; ++i) {
+    const int32 OppositeIndex =
+        (i + DirectionSampleCount / 2) % DirectionSampleCount;
+    const float PairWiderSideCm =
+        FMath::Max(ClearanceCm[i], ClearanceCm[OppositeIndex]);
+    NarrowestPairClearanceCm =
+        FMath::Min(NarrowestPairClearanceCm, PairWiderSideCm);
+  }
+
+  // 最终宽度 >= 0.5m 使用完整配置值，<= 0.2m 使用配置值的一半，中间线性缩放。
+  const float ClearanceAlpha = FMath::Clamp(
+      (NarrowestPairClearanceCm - RestrictionMaxCm) /
+          (RestrictionStartCm - RestrictionMaxCm),
+      0.0f, 1.0f);
+  const float ThresholdScale = FMath::Lerp(0.5f, 1.0f, ClearanceAlpha);
+  CachedEffectiveDriftDegrees = ExecuteDriftDegrees * ThresholdScale;
+  LastDriftProbeTime = CurrentTime;
+  LastDriftProbeBaseDegrees = ExecuteDriftDegrees;
+  return CachedEffectiveDriftDegrees;
+}
+
 void UNavigationComponent::DrawForwardIndicator(AActor *Owner) {
   if (!bDrawForwardIndicator || !Owner || !GetWorld()) return;
 
@@ -403,10 +726,15 @@ void UNavigationComponent::TickComponent(
   if (bIsTurningLeft) TurnPlayer(-DebugTurnRateDegreesPerSec * DeltaTime);
   if (bIsTurningRight) TurnPlayer(DebugTurnRateDegreesPerSec * DeltaTime);
 
+  if (!bCameraModesInitialized) InitializeCameraModes();
+  UpdateFreeCameraInput();
+
   // 绘制人物朝向指示线+箭头
   DrawForwardIndicator(Owner);
 
   const float CurrentTime = GetWorld()->GetTimeSeconds();
+  const float EffectiveDriftDegrees =
+      GetEffectiveExecuteDriftDegrees(Owner->GetActorLocation());
 
   // 每帧打印当前状态（屏幕左上角，Key=9999）
   if (bShowDebugMessages && GEngine) {
@@ -426,6 +754,11 @@ void UNavigationComponent::TickComponent(
                         *StateName.ToString(),
                         CurrentWaypointIndex,
                         FMath::Max(0, PlannedWaypoints.Num() - 1)));
+
+    GEngine->AddOnScreenDebugMessage(
+        10000, 0.f, FColor::Yellow,
+        FString::Printf(TEXT("Angle drift threshold: %.1f deg | base: %.1f deg"),
+                        EffectiveDriftDegrees, ExecuteDriftDegrees));
   }
 
   if (!bIsNavigating || !CachedNavSys || ActiveTarget == NAME_None) {

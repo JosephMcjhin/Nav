@@ -30,7 +30,7 @@ void FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
 
   const float AbsErr = FMath::Abs(Ctx.AngleError);
 
-  if (AbsErr > Nav.ExecuteDriftDegrees) {
+  if (AbsErr > Nav.GetEffectiveExecuteDriftDegrees(Ctx.PlayerLoc)) {
     Nav.ClearNonCriticalPrompts();
     Nav.SendSoundEffect(ENavSoundCategory::SFX_Deviation);
   }
