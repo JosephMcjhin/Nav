@@ -290,10 +290,25 @@ def mark_imu_received(ws=None):
     now = time.time()
     with imu_state_lock:
         last_imu_received_at = now
-    if ws is not None:
-        meta = active_ws.get(ws)
-        if meta is not None:
-            meta["last_imu_at"] = now
+
+    notify_ws = ws or glasses_client_ws
+    if notify_ws is None:
+        return
+
+    meta = active_ws.get(notify_ws)
+    if meta is None:
+        return
+
+    meta["last_imu_at"] = now
+    if meta.get("imu_status") == "normal":
+        return
+
+    meta["imu_status"] = "normal"
+    send_json(notify_ws, {
+        "type": "imu_status",
+        "status": "normal",
+        "text": "normal",
+    })
 
 
 def _imu_watchdog_loop():
@@ -321,7 +336,12 @@ def _imu_watchdog_loop():
         with imu_state_lock:
             last_imu_at = last_imu_received_at
 
-        has_fresh_imu = last_imu_at is not None and last_imu_at >= connected_at
+        imu_age = None if last_imu_at is None else now - last_imu_at
+        has_fresh_imu = (
+            last_imu_at is not None
+            and last_imu_at >= connected_at
+            and imu_age < no_imu_timeout
+        )
         if has_fresh_imu:
             continue
         if now - connected_at < no_imu_timeout:
@@ -336,6 +356,7 @@ def _imu_watchdog_loop():
         }
         if send_json(ws, warning):
             meta["last_imu_warning_at"] = now
+            meta["imu_status"] = "warning"
             log.warning(
                 "IMU watchdog: no fresh IMU data for %.1fs; warning sent to glasses ip=%s",
                 now - connected_at if last_imu_at is None else now - last_imu_at,
