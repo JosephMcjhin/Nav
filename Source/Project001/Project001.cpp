@@ -15,6 +15,17 @@ IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, Project001, "Project001");
 
 namespace {
 bool GLocalNavTTSEnabled = false;
+FProcHandle GLocalNavTTSProc;
+
+void StopLocalNavTTSProcess() {
+  if (!GLocalNavTTSProc.IsValid()) return;
+
+  if (FPlatformProcess::IsProcRunning(GLocalNavTTSProc)) {
+    FPlatformProcess::TerminateProc(GLocalNavTTSProc, true);
+  }
+  FPlatformProcess::CloseProc(GLocalNavTTSProc);
+  GLocalNavTTSProc = FProcHandle();
+}
 
 UNavigationComponent *FindNavigationComponent(UWorld *World) {
   if (!World) {
@@ -169,7 +180,8 @@ const FString &GetBuildTimestamp() {
   return Cached;
 }
 
-void SpeakLocalNavText(const FString &Text, float SpeedMultiplier) {
+void SpeakLocalNavText(const FString &Text) {
+  StopLocalNavTTSProcess();
   if (!GLocalNavTTSEnabled || Text.IsEmpty()) {
     return;
   }
@@ -177,8 +189,10 @@ void SpeakLocalNavText(const FString &Text, float SpeedMultiplier) {
 #if PLATFORM_WINDOWS
   FString Escaped = Text;
   Escaped.ReplaceInline(TEXT("'"), TEXT("''"));
-  // Rate: 0=normal, positive=faster. Map SpeedMultiplier 1.0→0, 2.0→5, 3.0→10
-  const int32 Rate = FMath::Clamp(FMath::RoundToInt((SpeedMultiplier - 1.0f) * 5.0f), -10, 10);
+  // 本地校验固定使用 2.5 倍语速；SAPI Rate 的范围是 -10..10。
+  constexpr float LocalTTSSpeedMultiplier = 2.5f;
+  const int32 Rate = FMath::Clamp(
+      FMath::RoundToInt((LocalTTSSpeedMultiplier - 1.0f) * 5.0f), -10, 10);
   const FString Script = FString::Printf(
       TEXT("Add-Type -AssemblyName System.Speech;")
       TEXT("$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;")
@@ -190,8 +204,9 @@ void SpeakLocalNavText(const FString &Text, float SpeedMultiplier) {
   const FString Args = FString::Printf(
       TEXT("-NoProfile -NonInteractive -WindowStyle Hidden -Command \"%s\""),
       *Command);
-  FPlatformProcess::CreateProc(TEXT("powershell.exe"), *Args, false, true, true,
-                               nullptr, 0, nullptr, nullptr);
+  GLocalNavTTSProc = FPlatformProcess::CreateProc(
+      TEXT("powershell.exe"), *Args, false, true, true, nullptr, 0, nullptr,
+      nullptr);
 #else
   UE_LOG(LogTemp, Warning, TEXT("Local nav TTS unsupported on this platform."));
 #endif

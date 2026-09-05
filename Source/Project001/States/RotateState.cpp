@@ -68,10 +68,11 @@ void FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
       const int32 FreqHz = FMath::RoundToInt(
           Nav.SoundComp->RotateBeepBaseFreqHz +
           Nav.SoundComp->RotateBeepFreqRangeHz * Progress * Progress);
-      // 立体声 pan：使用更强的声道分离度（RotatePanStrength，默认 1.0=全偏）
-      // AngleError>0 表示目标在右侧（需右转）→ 偏右声道
-      const float Pan = FMath::Clamp(
-          Ctx.AngleError / 60.0f * Nav.SoundComp->RotatePanStrength, -1.0f, 1.0f);
+      // 立体声 pan：每帧按当前 AngleError 的符号选择左/右声道。
+      // 不使用角度大小计算 Pan，避免越接近目标越向中间收。
+      const float PanDirection = FMath::Sign(Ctx.AngleError);
+      const float Pan = PanDirection *
+                        FMath::Clamp(Nav.SoundComp->RotatePanStrength, 0.0f, 1.0f);
       // 越接近对准，音量越低（避免快到位时还吵）
       const float Volume = FMath::Clamp(0.4f + 0.6f * (1.0f - Progress), 0.4f, 1.0f);
       // 蜂鸣间隔随 Progress 动态缩短（越对准更新越频繁）
@@ -101,9 +102,19 @@ void FRotateState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
 }
 
 void FRotateState::OnExit(UNavigationComponent& Nav, FNavContext& Ctx) {
-  // 离开 Rotate 时停所有连续引导音、清掉之前的提示、发校准成功
+  // 离开 Rotate 时总是停连续引导音；只有真正对准并进入执行阶段时，
+  // 才发送“校准成功”的音效和语音。偏离/重规划/停止导航也会触发 OnExit。
   Nav.StopBeep();
   Nav.StopDrip();
+
+  const bool bHasValidWaypoint =
+      Nav.CurrentWaypointIndex >= 0 && Nav.PlannedWaypoints.Num() >= 2;
+  const bool bAligned =
+      FMath::Abs(Ctx.AngleError) < Nav.AlignToleranceDegrees;
+  if (!bHasValidWaypoint || !bAligned) {
+    return;
+  }
+
   Nav.ClearNonCriticalPrompts();
   Nav.SendSoundEffect(ENavSoundCategory::SFX_WaypointReached);
   Nav.EnqueuePrompt(UTF8_TO_TCHAR(u8"校准成功"));

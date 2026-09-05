@@ -1,8 +1,11 @@
 #include "NavigationComponent.h"
 
 #include "Blueprint/UserWidget.h"
+#include "CollisionQueryParams.h"
+#include "Components/CapsuleComponent.h"
 #include "DrawDebugHelpers.h"
 #include "TurnControlsWidget.h"
+#include "GameFramework/Character.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
@@ -227,10 +230,9 @@ static const FRemoteConfigField GRemoteConfigFields[] = {
     {TEXT("ExecuteDriftDegrees"),            FRemoteConfigField::Float},
     {TEXT("AlignIdleRepromptSeconds"),       FRemoteConfigField::Float},
     {TEXT("PromptGapSeconds"),               FRemoteConfigField::Float},
-    {TEXT("RouteDeviationThresholdMeters"),  FRemoteConfigField::Float},
+    {TEXT("RouteDeviationThresholdA"),       FRemoteConfigField::Float},
     {TEXT("RouteReplanCheckIntervalSeconds"), FRemoteConfigField::Float},
     {TEXT("WaypointReachRadiusMeters"),      FRemoteConfigField::Float},
-    {TEXT("TTSSpeedMultiplier"),             FRemoteConfigField::Float},
     {TEXT("RotateBeepBaseFreqHz"),           FRemoteConfigField::Float},
     {TEXT("RotateBeepFreqRangeHz"),          FRemoteConfigField::Float},
     {TEXT("RotatePanStrength"),              FRemoteConfigField::Float},
@@ -296,15 +298,12 @@ bool UNavigationComponent::ApplyRemoteConfig(const FString &JsonString) {
       else if (FCString::Strcmp(Field.Key, TEXT("PromptGapSeconds")) == 0) {
         if (SoundComp) SoundComp->PromptGapSeconds = FValue;
       }
-      else if (FCString::Strcmp(Field.Key, TEXT("RouteDeviationThresholdMeters")) == 0)
-        RouteDeviationThresholdMeters = FValue;
+      else if (FCString::Strcmp(Field.Key, TEXT("RouteDeviationThresholdA")) == 0)
+        RouteDeviationThresholdA = FValue;
       else if (FCString::Strcmp(Field.Key, TEXT("RouteReplanCheckIntervalSeconds")) == 0)
         RouteReplanCheckIntervalSeconds = FValue;
       else if (FCString::Strcmp(Field.Key, TEXT("WaypointReachRadiusMeters")) == 0)
         WaypointReachRadiusMeters = FValue;
-      else if (FCString::Strcmp(Field.Key, TEXT("TTSSpeedMultiplier")) == 0) {
-        if (SoundComp) SoundComp->TTSSpeedMultiplier = FMath::Max(FValue, 0.1f);
-      }
       else if (FCString::Strcmp(Field.Key, TEXT("RotateBeepBaseFreqHz")) == 0) {
         if (SoundComp) SoundComp->RotateBeepBaseFreqHz = FValue;
       }
@@ -485,11 +484,38 @@ void UNavigationComponent::TickComponent(
       (CurrentTime - LastReplanCheckTime) > RouteReplanCheckIntervalSeconds) {
     LastReplanCheckTime = CurrentTime;
 
-    // 检测 A：全局实时路径比计划路径距离短很多 → 偏移
+    // 规则：当前待走路点被障碍物挡住时，强制重新规划。
+    const int32 FirstWaypointIndex =
+        FMath::Clamp(CurrentWaypointIndex, 1, PlannedWaypoints.Num() - 1);
+    // ActorLocation 对 Character 通常是胶囊体中心，统一使用离地 20cm 的高度。
+    constexpr float TraceHeightAboveGroundCm = 20.0f;
+    float TraceHeight = NavCtx.PlayerLoc.Z;
+    if (const ACharacter *Character = Cast<ACharacter>(Owner)) {
+      if (const UCapsuleComponent *Capsule = Character->GetCapsuleComponent()) {
+        TraceHeight -= Capsule->GetScaledCapsuleHalfHeight() -
+                       TraceHeightAboveGroundCm;
+      }
+    }
+    FVector TraceStart = NavCtx.PlayerLoc;
+    TraceStart.Z = TraceHeight;
+    FVector TraceEnd = PlannedWaypoints[FirstWaypointIndex];
+    TraceEnd.Z += TraceHeightAboveGroundCm;
+
+    FCollisionQueryParams TraceParams(
+        FName(TEXT("NavigationFirstWaypointTrace")), true);
+    TraceParams.AddIgnoredActor(Owner);
+    const FCollisionObjectQueryParams ObjectQueryParams(
+        FCollisionObjectQueryParams::AllObjects);
+    FHitResult TraceHit;
+    const bool bFirstWaypointBlocked = GetWorld()->LineTraceSingleByObjectType(
+        TraceHit, TraceStart, TraceEnd,
+        ObjectQueryParams, TraceParams);
+
+    // 检测 A：计划剩余距离与实时 NavMesh 最短距离的绝对差值过大 → 偏移
     const FVector LivePathEnd = GetProjectedTargetForPlayer(NavCtx.PlayerLoc);
     UNavigationPath *LivePath = CachedNavSys->FindPathToLocationSynchronously(
         GetWorld(), NavCtx.PlayerLoc, LivePathEnd);
-    bool bDeviated = false;
+    bool bDeviated = bFirstWaypointBlocked;
     if (LivePath && LivePath->PathPoints.Num() >= 2) {
       float LiveTotal = 0.0f;
       for (int32 i = 0; i < LivePath->PathPoints.Num() - 1; ++i)
@@ -502,20 +528,9 @@ void UNavigationComponent::TickComponent(
         PlannedRemain += FVector::Dist(PlannedWaypoints[i], PlannedWaypoints[i + 1]);
       PlannedRemain /= 100.0f * DistanceScale;
 
-      bDeviated = PlannedRemain - LiveTotal > RouteDeviationThresholdMeters;
-    }
-
-    // 检测 B：玩家到下一个路点的路径多了额外路点，且偏离 > 0.5m
-    if (!bDeviated) {
-      UNavigationPath *SegPath = CachedNavSys->FindPathToLocationSynchronously(
-          GetWorld(), NavCtx.PlayerLoc,
-          PlannedWaypoints[CurrentWaypointIndex]);
-      if (SegPath && SegPath->PathPoints.Num() > 2) {
-        const float DistToFirstExtra =
-            FVector::Dist(NavCtx.PlayerLoc, SegPath->PathPoints[1]) /
-            100.0f / DistanceScale;
-        bDeviated = DistToFirstExtra > 1.0f;
-      }
+      bDeviated = bDeviated ||
+                  FMath::Abs(PlannedRemain - LiveTotal) >
+                      RouteDeviationThresholdA;
     }
 
     if (bDeviated) {
@@ -550,22 +565,11 @@ void UNavigationComponent::TickComponent(
 
   // Debug: 画玩家到下一个路点的 navmesh 真实导航路线。
   {
-    // const FVector NW =
-    //     PlannedWaypoints[FMath::Min(CurrentWaypointIndex,
-    //                                 PlannedWaypoints.Num() - 1)];
-    // DrawDebugLine(GetWorld(), NavCtx.PlayerLoc, NW, FColor::Yellow, false,
-    //               0.1f, 0, 1.0f);
-    UNavigationPath *SegPath = CachedNavSys->FindPathToLocationSynchronously(
-        GetWorld(), NavCtx.PlayerLoc,
+    const FVector NW =
         PlannedWaypoints[FMath::Min(CurrentWaypointIndex,
-                                    PlannedWaypoints.Num() - 1)]);
-    if (SegPath && SegPath->PathPoints.Num() >= 2) {
-      for (int32 i = 0; i < SegPath->PathPoints.Num() - 1; ++i) {
-        DrawDebugLine(GetWorld(), SegPath->PathPoints[i],
-                      SegPath->PathPoints[i + 1], FColor::Yellow, false,
-                      0.1f, 0, 1.0f);
-      }
-    }
+                                    PlannedWaypoints.Num() - 1)];
+    DrawDebugLine(GetWorld(), NavCtx.PlayerLoc, NW, FColor::Yellow, false,
+                  0.1f, 0, 1.0f);
   }
 
   LastPlayerLocation = NavCtx.PlayerLoc;

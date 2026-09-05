@@ -78,6 +78,13 @@ CACHE_MAX_ENTRIES = 128
 # 默认中文语音（微软 Neural 语音，质量好）
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
+# 后端统一固定语速：1.0=正常，2.5=约 2.5 倍。
+TTS_SPEED_MULTIPLIER = 2.5
+EDGE_TTS_RATE = f"{round((TTS_SPEED_MULTIPLIER - 1.0) * 100):+d}%"
+LOCAL_SAPI_RATE = max(
+    -10, min(10, round((TTS_SPEED_MULTIPLIER - 1.0) * 5))
+)  # SAPI Rate，范围 -10 ~ +10
+
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  LRU 缓存                                                                   ║
@@ -149,7 +156,9 @@ class _EdgeTTSBackend:
 
     async def _iter_mp3_chunks(self, text: str):
         """异步迭代 edge-tts 的 MP3 音频 chunk（原始 bytes）。"""
-        communicate = edge_tts.Communicate(text, self.voice)
+        communicate = edge_tts.Communicate(
+            text, self.voice, rate=EDGE_TTS_RATE
+        )
         async for chunk in communicate.stream():
             if chunk.get("type") == "audio":
                 yield chunk["data"]
@@ -254,9 +263,6 @@ class _PowershellTTSBackend:
     is_local = True
     is_streaming_supported = True  # 合成完切片，体验等同流式
 
-    # 与 UE 端 $s.Rate=5 对齐（SAPI Rate，范围 -10 ~ +10）
-    SPEECH_RATE = 5
-
     def __init__(self):
         self._available: Optional[bool] = None
 
@@ -295,7 +301,7 @@ class _PowershellTTSBackend:
         script = (
             "Add-Type -AssemblyName System.Speech;"
             "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-            f"$s.Rate={self.SPEECH_RATE};"
+            f"$s.Rate={LOCAL_SAPI_RATE};"
             f"$s.SetOutputToWaveFile('{tmp_path}');"
             f"$s.Speak('{escaped}');"
             "$s.Dispose()"

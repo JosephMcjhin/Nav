@@ -63,8 +63,6 @@ public:
 
   // ── TTS ───────────────────────────────────────────────────────────
   UPROPERTY(EditAnywhere, Category = "TTS")
-  float TTSSpeedMultiplier = 2.0f;
-  UPROPERTY(EditAnywhere, Category = "TTS")
   float PromptGapSeconds = 0.2f;
 
   // ── PC 端音效资产 ─────────────────────────────────────────────────
@@ -88,11 +86,8 @@ private:
   float LastDripSendTime = 0.0f;
   float LastLocalDripTime = 0.0f;
 
-  // TTS 队列
-  TArray<FString> HighPriorityPrompts;
-  TArray<FString> LowPriorityPrompts;
-  FString CurrentRealtimePrompt;
-  bool bHasRealtimePromptPending = false;
+  // TTS 待播队列：调度时只取最新一条，其余全部丢弃。
+  TArray<FString> PendingPrompts;
   float NextPromptDispatchTime = 0.0f;
 };
 

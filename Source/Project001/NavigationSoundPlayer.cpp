@@ -11,6 +11,8 @@
 // 辅助函数（匿名命名空间）
 // ============================================================================
 namespace {
+constexpr float NavigationTTSSpeedMultiplier = 2.5f;
+
 void SendBeepMessage(AActor* OwnerActor, bool bActive, int32 FreqHz,
                      float Pan, float Volume, float IntervalMs,
                      const FString& BeepTypeStr) {
@@ -177,18 +179,14 @@ void UNavigationSoundComponent::PlayLocalBeep(bool bActive, int32 FreqHz,
 void UNavigationSoundComponent::EnqueuePrompt(const FString& Message,
                                                bool bHighPriority) {
   if (Message.IsEmpty()) return;
-  if (bHighPriority) {
-    HighPriorityPrompts.Add(Message);
-  } else {
-    LowPriorityPrompts.Add(Message);
-  }
+  // 保留接口参数以兼容现有调用方；待播放语音统一按到达顺序排队，
+  // 调度时只播放最新一条，避免旧提示堆积。
+  (void)bHighPriority;
+  PendingPrompts.Add(Message);
 }
 
 void UNavigationSoundComponent::ClearNonCriticalPrompts() {
-  LowPriorityPrompts.Empty();
-  HighPriorityPrompts.Empty();
-  CurrentRealtimePrompt.Empty();
-  bHasRealtimePromptPending = false;
+  PendingPrompts.Empty();
 }
 
 float UNavigationSoundComponent::EstimatePromptDurationSeconds(
@@ -216,34 +214,28 @@ float UNavigationSoundComponent::EstimatePromptDurationSeconds(
       break;
     }
   }
-  return DurationSeconds / FMath::Max(TTSSpeedMultiplier, 0.1f);
+  return DurationSeconds / NavigationTTSSpeedMultiplier;
 }
 
 void UNavigationSoundComponent::ProcessPromptScheduler(float CurrentTime) {
   if (CurrentTime < NextPromptDispatchTime) return;
 
   FString MessageToSend;
-  if (HighPriorityPrompts.Num() > 0) {
-    MessageToSend = HighPriorityPrompts[0];
-    HighPriorityPrompts.RemoveAt(0);
-  } else if (LowPriorityPrompts.Num() > 0) {
-    MessageToSend = LowPriorityPrompts[0];
-    LowPriorityPrompts.RemoveAt(0);
-  } else if (bHasRealtimePromptPending) {
-    MessageToSend = CurrentRealtimePrompt;
-    bHasRealtimePromptPending = false;
+  if (PendingPrompts.Num() > 0) {
+    MessageToSend = PendingPrompts.Last();
+    PendingPrompts.Empty();
   }
   if (MessageToSend.IsEmpty()) return;
 
   AActor* OwnerActor = GetOwner();
   if (!OwnerActor) return;
 
-  Project001Console::SpeakLocalNavText(MessageToSend, TTSSpeedMultiplier);
+  Project001Console::SpeakLocalNavText(MessageToSend);
   if (UServerConnectionComponent* ServerComp =
           OwnerActor->FindComponentByClass<UServerConnectionComponent>()) {
     const FString JsonStr = FString::Printf(
-        TEXT("{\"type\":\"nav_prompt\",\"text\":\"%s\",\"speed\":%.1f}"),
-        *MessageToSend, TTSSpeedMultiplier);
+        TEXT("{\"type\":\"nav_prompt\",\"text\":\"%s\"}"),
+        *MessageToSend);
     ServerComp->SendString(JsonStr);
   }
   NextPromptDispatchTime =

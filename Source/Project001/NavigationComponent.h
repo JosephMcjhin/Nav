@@ -140,9 +140,9 @@ public:
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
   float AlignIdleRepromptSeconds = 2.5f;
 
-  // 路线规划：实时路径与固定路点的距离差超过此值 → 偏离，重新规划（米）。
+  // 路线规划：检测A阈值。计划剩余距离与实时 NavMesh 最短距离的绝对差值 > 该值 → 偏离，重新规划（米）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")
-  float RouteDeviationThresholdMeters = 2.0f;
+  float RouteDeviationThresholdA = 0.5f;
 
   // 路线偏差检查间隔（秒）。
   UPROPERTY(EditAnywhere, Category = "Navigation|StateMachine")

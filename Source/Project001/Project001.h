@@ -7,7 +7,7 @@
 namespace Project001Console {
 bool IsLocalNavTTSEnabled();
 void SetLocalNavTTSEnabled(bool bEnabled);
-void SpeakLocalNavText(const FString &Text, float SpeedMultiplier = 2.0f);
+void SpeakLocalNavText(const FString &Text);
 
 // 返回当前二进制的构建时间戳（编译期生成，格式 "YYYY-MM-DD HH:MM:SS"）。
 // 用于打包后版本确认：同一份打包出来的二进制，这个字符串是固定的；
@@ -22,5 +22,3 @@ const FString &GetBuildTimestamp();
 void PlayLocalBeep(bool bActive, int32 FreqHz, float Pan = 0.0f,
                    float Volume = 1.0f, float IntervalMs = 0.0f);
 }
-
-

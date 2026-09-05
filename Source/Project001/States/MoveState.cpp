@@ -40,10 +40,16 @@ void FMoveState::Tick(UNavigationComponent& Nav, FNavContext& Ctx) {
 
   // 水滴引导：用统一间隔（BeepUpdateIntervalSeconds），发送一次消息给客户端自行循环。
   if (Traveled >= Nav.ExecuteBeepStartMeters) {
-    const float Total =
-        FMath::Max(Traveled + Ctx.RemainingMeters, KINDA_SMALL_NUMBER);
+    const bool bFinalWaypoint =
+        Nav.CurrentWaypointIndex >= Nav.PlannedWaypoints.Num() - 1;
+    const float ReachThresholdMeters =
+        bFinalWaypoint ? Nav.ArrivalDistanceMeters : Nav.WaypointReachRadiusMeters;
+    const float EffectiveRemaining =
+        FMath::Max(Ctx.RemainingMeters - ReachThresholdMeters, 0.0f);
+    const float Total = FMath::Max(Traveled + EffectiveRemaining,
+                                   KINDA_SMALL_NUMBER);
     const float Progress =
-        FMath::Clamp(1.0f - (Ctx.RemainingMeters / Total), 0.0f, 1.0f);
+        FMath::Clamp(1.0f - (EffectiveRemaining / Total), 0.0f, 1.0f);
     // 越接近目标，间隔越短（与 beep 统一公式）
     if (Nav.SoundComp) {
       Nav.SoundComp->BeepUpdateIntervalSeconds =

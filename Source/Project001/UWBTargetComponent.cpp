@@ -187,3 +187,12 @@ void UUWBTargetComponent::SetIMURotation(float Yaw) {
         FString::Printf(TEXT("[IMU] Set rotation Yaw:%.1f"), Yaw));
   }
 }
+
+void UUWBTargetComponent::ClearIMURotation() {
+  bHasRotation = false;
+
+  if (AActor *Owner = GetOwner()) {
+    TargetRotation = Owner->GetActorRotation();
+    SmoothedTargetRotation = TargetRotation;
+  }
+}

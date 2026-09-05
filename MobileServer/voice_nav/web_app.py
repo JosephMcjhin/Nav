@@ -13,6 +13,8 @@ import threading
 import time
 import base64
 import os
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 import numpy as np
 from flask import Flask, jsonify, request
@@ -23,7 +25,28 @@ from modules.location_calibration import UwbCalibrationManager
 from modules.tts_engine import get_engine as get_tts_engine
 
 # ── App setup ──────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="[Server] %(message)s")
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "voice_nav.log"
+LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
+
+# 控制台和滚动文件同时记录。root logger 会收集 web_app、tts_engine、Flask
+# 以及其它后端模块的日志，单个文件达到 10 MB 后自动保留 5 个历史文件。
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
+    ],
+    force=True,
+)
 log = logging.getLogger("web_app")
 
 # Silence Flask's default HTTP request logging (werkzeug) to prevent polling spam
@@ -51,6 +74,8 @@ ue_client_ws = None
 glasses_client_ws = None
 last_missing_glasses_log = 0.0
 last_no_ue_log = 0.0
+imu_state_lock = threading.Lock()
+last_imu_received_at = None
 ue_command_queue: "queue.Queue[dict]" = queue.Queue(maxsize=UE_COMMAND_QUEUE_SIZE)
 ue_latest_state: dict[str, dict] = {}
 ue_latest_state_lock = threading.Lock()
@@ -225,6 +250,8 @@ def register_ws_role(ws, role: str):
         return
 
     meta["role"] = role
+    if role == "glasses":
+        meta["last_imu_warning_at"] = 0.0
     log.info(f"WebSocket client registered: ip={meta.get('ip', 'unknown')} role={role}")
 
 
@@ -255,6 +282,65 @@ def log_missing_glasses_once():
     if now - last_missing_glasses_log >= 5.0:
         last_missing_glasses_log = now
         log.warning("No active glasses client to receive TTS audio.")
+
+
+def mark_imu_received(ws=None):
+    """Record the latest valid IMU packet from WS or the external UDP gateway."""
+    global last_imu_received_at
+    now = time.time()
+    with imu_state_lock:
+        last_imu_received_at = now
+    if ws is not None:
+        meta = active_ws.get(ws)
+        if meta is not None:
+            meta["last_imu_at"] = now
+
+
+def _imu_watchdog_loop():
+    """Warn the connected glasses when no fresh IMU packet has arrived."""
+    no_imu_timeout = 5.0
+    warning_interval = 5.0
+    log.info(
+        "IMU watchdog active: timeout=%.1fs warning_interval=%.1fs",
+        no_imu_timeout,
+        warning_interval,
+    )
+
+    while True:
+        time.sleep(1.0)
+        now = time.time()
+        ws = glasses_client_ws
+        if ws is None or ws not in active_ws:
+            continue
+
+        meta = active_ws.get(ws, {})
+        if meta.get("role") != "glasses":
+            continue
+        connected_at = float(meta.get("connected_at", now))
+        last_warning_at = float(meta.get("last_imu_warning_at", 0.0))
+        with imu_state_lock:
+            last_imu_at = last_imu_received_at
+
+        has_fresh_imu = last_imu_at is not None and last_imu_at >= connected_at
+        if has_fresh_imu:
+            continue
+        if now - connected_at < no_imu_timeout:
+            continue
+        if now - last_warning_at < warning_interval:
+            continue
+
+        warning = {
+            "type": "warning",
+            "code": "imu_timeout",
+            "text": "未检测到 IMU 数据，请检查 IMU 传感器连接",
+        }
+        if send_json(ws, warning):
+            meta["last_imu_warning_at"] = now
+            log.warning(
+                "IMU watchdog: no fresh IMU data for %.1fs; warning sent to glasses ip=%s",
+                now - connected_at if last_imu_at is None else now - last_imu_at,
+                meta.get("ip", "unknown"),
+            )
 
 
 def _stream_and_send_tts(target_ws, text: str, timestamp: int):
@@ -517,6 +603,7 @@ def ws_handler(ws):
 
             elif msg_type == "imu":
                 raw_yaw = float(msg.get("yaw", 0.0))
+                mark_imu_received(ws)
                 # Update the latest raw IMU yaw for heading calibration
                 uwb_calibrator.update_imu_yaw(raw_yaw)
                 if (not uwb_calibrator.is_imu_calibrated or
@@ -667,6 +754,7 @@ def _udp_uwb_listener(port: int = 9003):
                 euler = payload.get("euler")
                 if isinstance(euler, list) and len(euler) >= 3:
                     raw_yaw = float(euler[0])
+                    mark_imu_received()
                     # Update the latest raw IMU yaw for heading calibration
                     uwb_calibrator.update_imu_yaw(raw_yaw)
                     if (not uwb_calibrator.is_imu_calibrated or
@@ -741,6 +829,7 @@ if __name__ == "__main__":
 
     # Start UWB listener thread
     threading.Thread(target=_udp_uwb_listener, daemon=True).start()
+    threading.Thread(target=_imu_watchdog_loop, daemon=True, name="IMUWatchdog").start()
 
     # 启动时立即初始化 TTS 引擎。
     # 缺库/后端不可用会在这里直接抛异常退出，而不是等到第一次 TTS 请求才崩。
@@ -754,5 +843,6 @@ if __name__ == "__main__":
         log.error("=" * 60)
         raise
 
+    log.info(f"Log file: {LOG_FILE}")
     log.info(f"Starting server at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

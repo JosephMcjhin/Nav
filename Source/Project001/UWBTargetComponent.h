@@ -27,6 +27,9 @@ public:
   UFUNCTION(BlueprintCallable, Category = "IMU")
   void SetIMURotation(float Yaw);
 
+  UFUNCTION(BlueprintCallable, Category = "IMU")
+  void ClearIMURotation();
+
 private:
   FVector TargetLocation = FVector::ZeroVector;
   FVector SmoothedTargetLocation = FVector::ZeroVector;

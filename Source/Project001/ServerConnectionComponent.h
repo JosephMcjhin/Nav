@@ -89,6 +89,7 @@ private:
   int32 LastPoints = 0;
 
   void CleanupWebSocket(bool bCloseSocket);
+  void ClearIMURotationHold();
   void HandleJsonCommand(const FString &MessageString);
   void HandleBinaryData(const void *Data, SIZE_T Size);
 };

@@ -41,6 +41,8 @@ void UServerConnectionComponent::TickComponent(
 }
 
 void UServerConnectionComponent::CleanupWebSocket(bool bCloseSocket) {
+  ClearIMURotationHold();
+
   if (!WebSocket.IsValid()) {
     return;
   }
@@ -104,6 +106,7 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
     if (Self->bIsDisconnecting) {
       return;
     }
+    Self->ClearIMURotationHold();
     UE_LOG(LogTemp, Error, TEXT("[ServerConnection] WS Error: %s"), *Error);
     if (GEngine)
       GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red,
@@ -136,6 +139,7 @@ void UServerConnectionComponent::ConnectToServer(const FString &InServerURL) {
                TEXT("[ServerConnection] WS Closed: Code=%d Reason=%s Clean=%d"),
                StatusCode, *Reason, bWasClean);
         Self->ConnectedURL.Empty();
+        Self->ClearIMURotationHold();
         if (Self->bIsDisconnecting) {
           return;
         }
@@ -230,6 +234,15 @@ void UServerConnectionComponent::ClearIPCache() {
   if (UGameplayStatics::DoesSaveGameExist(TEXT("NavSettingsSlot"), 0)) {
     UGameplayStatics::DeleteGameInSlot(TEXT("NavSettingsSlot"), 0);
     UE_LOG(LogTemp, Log, TEXT("[ServerConnection] IP cache deleted."));
+  }
+}
+
+void UServerConnectionComponent::ClearIMURotationHold() {
+  if (AActor *Owner = GetOwner()) {
+    if (UUWBTargetComponent *UWBComp =
+            Owner->FindComponentByClass<UUWBTargetComponent>()) {
+      UWBComp->ClearIMURotation();
+    }
   }
 }
 
