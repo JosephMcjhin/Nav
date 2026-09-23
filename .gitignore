@@ -10,10 +10,13 @@ Saved/
 *.pdb
 *.obj
 
-# User specific request: Exclude Content for now
-Content/
+# Track project Content, including maps and their external actor/object assets.
+# Exclude local developer assets and local collections only.
+/Content/Developers/
+/Content/Collections/
 
 # Mobile Server / Python
+MobileServer/voice_nav/logs/
 __pycache__/
 *.pyc
 *.pyo

@@ -1,0 +1,8 @@
+# Unreal packages and source/runtime binary assets use Git LFS.
+*.uasset filter=lfs diff=lfs merge=lfs -text
+*.umap filter=lfs diff=lfs merge=lfs -text
+/Content/**/*.png filter=lfs diff=lfs merge=lfs -text
+/Content/**/*.wav filter=lfs diff=lfs merge=lfs -text
+/Content/**/*.FBX filter=lfs diff=lfs merge=lfs -text
+/Content/**/*.fbx filter=lfs diff=lfs merge=lfs -text
+/Content/**/*.bin filter=lfs diff=lfs merge=lfs -text
